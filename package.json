@@ -1,0 +1,17 @@
+{
+  "name": "@otpy/mcp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OTPy MCP server — agent-driven integration path. Implemented in P5.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
+  }
+}
