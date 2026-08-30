@@ -1,58 +1,272 @@
 import { describe, expect, it, vi } from "vitest";
-import { handleToolCall, parseConfig, TOOLS } from "../src/index.js";
+import { handleToolCall, parseConfig, TOOLS, verifyUserKeyScopes } from "../src/index.js";
+import type { McpServerConfig } from "../src/index.js";
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+const baseConfig: McpServerConfig = {
+  apiKey: "test_api_key",
+  userKey: "test_user_key",
+  baseUrl: "https://api.otpy.ir",
+};
 
 describe("otpy mcp server", () => {
-  it("parses config from cli args and env vars", () => {
-    const config = parseConfig(["--api-key", "otpy_cli_key", "--write"], {});
-    expect(config.apiKey).toBe("otpy_cli_key");
-    expect(config.writeEnabled).toBe(true);
+  describe("parseConfig", () => {
+    it("parses apiKey/userKey/baseUrl from cli args", () => {
+      const config = parseConfig(
+        ["--api-key", "otpy_cli_key", "--user-key", "otpy_uk_cli_key", "--base-url", "https://custom.example"],
+        {},
+      );
+      expect(config).toEqual({
+        apiKey: "otpy_cli_key",
+        userKey: "otpy_uk_cli_key",
+        baseUrl: "https://custom.example",
+      });
+    });
 
-    const envConfig = parseConfig([], { OTPY_API_KEY: "otpy_env_key", OTPY_MCP_WRITE: "false" });
-    expect(envConfig.apiKey).toBe("otpy_env_key");
-    expect(envConfig.writeEnabled).toBe(false);
+    it("parses apiKey/userKey from env vars, defaulting baseUrl", () => {
+      const config = parseConfig([], { OTPY_API_KEY: "otpy_env_key", OTPY_USER_KEY: "otpy_uk_env_key" });
+      expect(config).toEqual({
+        apiKey: "otpy_env_key",
+        userKey: "otpy_uk_env_key",
+        baseUrl: "https://api.otpy.ir",
+      });
+    });
+
+    it("has no writeEnabled field at all -- the old client-only flag is gone, not just unused", () => {
+      const config = parseConfig(["--write"], { OTPY_MCP_WRITE: "true" });
+      expect(config).not.toHaveProperty("writeEnabled");
+      expect(Object.keys(config).sort()).toEqual(["apiKey", "baseUrl", "userKey"]);
+    });
+
+    it("silently ignores the legacy --write flag and OTPY_MCP_WRITE env var (no-op, not an error)", () => {
+      const config = parseConfig(["--api-key", "k", "--write"], { OTPY_MCP_WRITE: "1" });
+      expect(config.apiKey).toBe("k");
+      // No exception, no hidden field -- parseConfig simply has nothing left that reads these.
+    });
   });
 
-  it("lists read and write tools", () => {
-    expect(TOOLS.some((t) => t.name === "get_usage")).toBe(true);
-    expect(TOOLS.some((t) => t.name === "get_balance")).toBe(true);
-    expect(TOOLS.some((t) => t.name === "send_test_otp")).toBe(true);
+  describe("TOOLS", () => {
+    it("lists read and write tools", () => {
+      expect(TOOLS.some((t) => t.name === "get_usage")).toBe(true);
+      expect(TOOLS.some((t) => t.name === "get_balance")).toBe(true);
+      expect(TOOLS.some((t) => t.name === "send_test_otp")).toBe(true);
+    });
+
+    it("no longer references the old Write Mode / dashboard-toggle mechanism in tool descriptions", () => {
+      for (const tool of TOOLS) {
+        expect(tool.description).not.toMatch(/Write Mode/i);
+        expect(tool.description).not.toMatch(/OTPY_MCP_WRITE/);
+      }
+    });
+
+    it("describes write-gated tools as requiring a real, server-verified user_key scope", () => {
+      const writeTool = TOOLS.find((t) => t.name === "send_test_otp")!;
+      expect(writeTool.description).toMatch(/user_key/);
+      expect(writeTool.description).toMatch(/write/);
+    });
   });
 
-  it("blocks write tools when write mode is disabled", async () => {
-    const config = { apiKey: "test_key", baseUrl: "https://api.otpy.ir", writeEnabled: false };
-    const res = await handleToolCall("send_test_otp", { phone: "09123456789" }, config);
-    expect(res.isError).toBe(true);
-    expect(res.content[0]?.text).toContain("Write mode is disabled");
+  describe("verifyUserKeyScopes (real, server-verified scope check)", () => {
+    it("calls GET /v1/user-keys/self with the user_key as a bearer token", async () => {
+      const mockFetch = vi.fn(async () =>
+        jsonResponse({ user_key_id: "uk1", write: true, billing: false, root: false, enabled: true }),
+      );
+
+      const result = await verifyUserKeyScopes(baseConfig, mockFetch as unknown as typeof fetch);
+
+      expect(result).toEqual({
+        ok: true,
+        scopes: { write: true, billing: false, root: false, enabled: true },
+        projectAllowed: null,
+      });
+      const [url, init] = mockFetch.mock.calls[0]!;
+      expect(String(url)).toBe("https://api.otpy.ir/v1/user-keys/self");
+      expect((init as RequestInit).headers).toMatchObject({ authorization: "Bearer test_user_key" });
+    });
+
+    it("passes project_id as a query param and surfaces project_allowed when present", async () => {
+      const mockFetch = vi.fn(async () =>
+        jsonResponse({ user_key_id: "uk1", write: true, billing: true, root: true, enabled: true, project_allowed: false }),
+      );
+
+      const result = await verifyUserKeyScopes(baseConfig, mockFetch as unknown as typeof fetch, "proj_123");
+
+      expect(result).toEqual({
+        ok: true,
+        scopes: { write: true, billing: true, root: true, enabled: true },
+        projectAllowed: false,
+      });
+      const [url] = mockFetch.mock.calls[0]!;
+      expect(String(url)).toBe("https://api.otpy.ir/v1/user-keys/self?project_id=proj_123");
+    });
+
+    it("treats a missing userKey as all-scopes-false rather than erroring (read tools still work)", async () => {
+      const mockFetch = vi.fn();
+      const result = await verifyUserKeyScopes({ ...baseConfig, userKey: "" }, mockFetch as unknown as typeof fetch);
+
+      expect(result).toEqual({
+        ok: true,
+        scopes: { write: false, billing: false, root: false, enabled: false },
+        projectAllowed: null,
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("fails closed (ok: false) when the API rejects the user_key with 401", async () => {
+      const mockFetch = vi.fn(async () => jsonResponse({ error: "unauthorized" }, 401));
+      const result = await verifyUserKeyScopes(baseConfig, mockFetch as unknown as typeof fetch);
+      expect(result.ok).toBe(false);
+    });
+
+    it("fails closed (ok: false) on a network error", async () => {
+      const mockFetch = vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      });
+      const result = await verifyUserKeyScopes(baseConfig, mockFetch as unknown as typeof fetch);
+      expect(result.ok).toBe(false);
+    });
   });
 
-  it("permits write tools when write mode is enabled", async () => {
-    const config = { apiKey: "test_key", baseUrl: "https://api.otpy.ir", writeEnabled: true };
-    const mockFetch = vi.fn(async () =>
-      new Response(JSON.stringify({ request_id: "test_req_123", free: true }), { status: 200 }),
-    );
+  describe("handleToolCall: real server-verified scope gating (not the old local flag)", () => {
+    it("denies a write tool when the server reports write:false, even though the legacy env var claims otherwise", async () => {
+      // The brief's exact scenario: an operator sets OTPY_MCP_WRITE=true locally, but the
+      // real user_key on file has write:false. parseConfig no longer even has a field for
+      // the legacy flag (see above), so there is nothing for it to influence here -- the
+      // live scope response is the only thing that matters.
+      parseConfig(["--write"], { OTPY_MCP_WRITE: "true" }); // legacy inputs: proven inert above
+      const scopeFetch = vi.fn(async () =>
+        jsonResponse({ user_key_id: "uk1", write: false, billing: false, root: false, enabled: true }),
+      );
 
-    const res = await handleToolCall("send_test_otp", { phone: "09123456789" }, config, mockFetch as any);
-    expect(res.isError).toBeFalsy();
-    expect(res.content[0]?.text).toContain("test_req_123");
-    expect(mockFetch).toHaveBeenCalled();
-  });
+      const res = await handleToolCall("send_test_otp", { phone: "09123456789" }, baseConfig, scopeFetch as unknown as typeof fetch);
 
-  it("executes read tools regardless of write mode", async () => {
-    const config = { apiKey: "test_key", baseUrl: "https://api.otpy.ir", writeEnabled: false };
-    const mockFetch = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
+      expect(res.isError).toBe(true);
+      expect(res.content[0]?.text).toContain("write");
+      expect(scopeFetch).toHaveBeenCalled();
+    });
+
+    it("permits a write tool when the server reports write:true, with no legacy flag involved at all", async () => {
+      const fetchFn = vi
+        .fn()
+        // First call: scope verification.
+        .mockImplementationOnce(async () =>
+          jsonResponse({ user_key_id: "uk1", write: true, billing: false, root: false, enabled: true }),
+        )
+        // Second call: the actual send_test_otp request.
+        .mockImplementationOnce(async () => jsonResponse({ request_id: "test_req_123", free: true }));
+
+      const res = await handleToolCall(
+        "send_test_otp",
+        { phone: "09123456789" },
+        baseConfig,
+        fetchFn as unknown as typeof fetch,
+      );
+
+      expect(res.isError).toBeFalsy();
+      expect(res.content[0]?.text).toContain("test_req_123");
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    });
+
+    it("denies a write tool outright when no userKey is configured at all", async () => {
+      const scopeFetch = vi.fn();
+      const res = await handleToolCall(
+        "verify_test_otp",
+        { phone: "09123456789", code: "123456" },
+        { ...baseConfig, userKey: "" },
+        scopeFetch as unknown as typeof fetch,
+      );
+
+      expect(res.isError).toBe(true);
+      expect(res.content[0]?.text).toContain("user_key");
+    });
+
+    it("denies a billing tool (get_balance) when the server reports billing:false", async () => {
+      const scopeFetch = vi.fn(async () =>
+        jsonResponse({ user_key_id: "uk1", write: true, billing: false, root: false, enabled: true }),
+      );
+      const res = await handleToolCall("get_balance", {}, baseConfig, scopeFetch as unknown as typeof fetch);
+      expect(res.isError).toBe(true);
+      expect(res.content[0]?.text).toContain("billing");
+    });
+
+    it("permits a billing tool (get_balance) when the server reports billing:true", async () => {
+      const scopeFetch = vi.fn(async () =>
+        jsonResponse({ user_key_id: "uk1", write: false, billing: true, root: false, enabled: true }),
+      );
+      const res = await handleToolCall("get_balance", {}, baseConfig, scopeFetch as unknown as typeof fetch);
+      expect(res.isError).toBeFalsy();
+      expect(res.content[0]?.text).toContain("default_otp_price_toman");
+    });
+
+    it("denies write tools requiring project access when project_allowed is false for the given project_id", async () => {
+      const fetchFn = vi.fn(async () =>
+        jsonResponse({
+          user_key_id: "uk1",
+          write: true,
+          billing: true,
+          root: true,
+          enabled: true,
+          project_allowed: false,
+        }),
+      );
+
+      const res = await handleToolCall(
+        "create_api_key",
+        { project_id: "proj_not_granted", name: "x" },
+        baseConfig,
+        fetchFn as unknown as typeof fetch,
+      );
+
+      expect(res.isError).toBe(true);
+      expect(res.content[0]?.text).toContain("not granted access");
+    });
+
+    it("permits access when project_allowed is true (or unrestricted / not applicable)", async () => {
+      const fetchFn = vi.fn(async () =>
+        jsonResponse({
+          user_key_id: "uk1",
+          write: true,
+          billing: false,
+          root: false,
+          enabled: true,
+          project_allowed: true,
+        }),
+      );
+
+      // create_api_key falls through to "Unknown tool" past the gate (no live handler wired
+      // for it yet -- same as before this task), which is exactly how we know the gate itself
+      // let it through: an error mentioning scopes/project would mean the gate blocked it.
+      const res = await handleToolCall(
+        "create_api_key",
+        { project_id: "proj_granted", name: "x" },
+        baseConfig,
+        fetchFn as unknown as typeof fetch,
+      );
+
+      expect(res.content[0]?.text).toBe("Unknown tool: create_api_key");
+    });
+
+    it("executes read tools (get_usage) regardless of scopes, without calling scope verification", async () => {
+      const mockFetch = vi.fn(async () =>
+        jsonResponse({
           free_used_today: 1,
           free_quota_today: 10,
           paid_today: 0,
           daily_limit: 100,
         }),
-        { status: 200 },
-      ),
-    );
+      );
 
-    const res = await handleToolCall("get_usage", {}, config, mockFetch as any);
-    expect(res.isError).toBeFalsy();
-    expect(res.content[0]?.text).toContain("free_used_today");
+      const res = await handleToolCall("get_usage", {}, baseConfig, mockFetch as unknown as typeof fetch);
+      expect(res.isError).toBeFalsy();
+      expect(res.content[0]?.text).toContain("free_used_today");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://api.otpy.ir/v1/usage",
+        expect.objectContaining({ headers: { authorization: "Bearer test_api_key" } }),
+      );
+    });
   });
 });
