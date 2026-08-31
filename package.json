@@ -1,6 +1,6 @@
 {
   "name": "@otpy/mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "OTPy MCP server — agent-driven integration path. Implemented in P5.",
