@@ -1,9 +1,24 @@
 {
   "name": "@otpy/mcp",
   "version": "0.3.2",
-  "private": true,
   "type": "module",
   "description": "OTPy MCP server — agent-driven integration path. Implemented in P5.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/o-t-p-y/mcp.git"
+  },
+  "bin": {
+    "otpy-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
