@@ -1,3 +1,9 @@
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { handleToolCall, parseConfig, TOOLS, verifyUserKeyScopes } from "../src/index.js";
 import type { McpServerConfig } from "../src/index.js";
@@ -318,6 +324,40 @@ describe("otpy mcp server", () => {
         "https://api.otpy.ir/v1/usage",
         expect.objectContaining({ headers: { authorization: "Bearer test_api_key" } }),
       );
+    });
+  });
+
+  describe("bin startup", () => {
+    const distPath = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+
+    it("starts the server when invoked through a symlink (npm bin link)", () => {
+      if (!existsSync(distPath)) return; // requires `pnpm build` first
+      const dir = mkdtempSync(join(tmpdir(), "otpy-mcp-link-"));
+      try {
+        const link = join(dir, "otpy-mcp");
+        symlinkSync(distPath, link);
+        const result = spawnSync(process.execPath, [link], {
+          encoding: "utf8",
+          input: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
+        });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain('"serverInfo"');
+        const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
+        expect(result.stdout).toContain(`"version":"${pkg.version}"`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("single-sources the server version from package.json", () => {
+      if (!existsSync(distPath)) return; // requires `pnpm build` first
+      const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
+      const result = spawnSync(process.execPath, [distPath], {
+        encoding: "utf8",
+        input: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(`"version":"${pkg.version}"`);
     });
   });
 });

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
 // Single source of truth for the server version: package.json. Read at runtime
 // (rootDir is src/, so a static JSON import of ../package.json would break tsc).
@@ -504,7 +506,9 @@ export function startMcpServer(
   });
 }
 
-// Auto-start when executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Auto-start when executed directly. npm links bins via symlink, so argv[1]
+// is the link path while import.meta.url is the realpath — compare realpaths.
+const invokedPath = process.argv[1] ? realpathSync(process.argv[1]) : "";
+if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
   startMcpServer();
 }
