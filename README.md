@@ -1,4 +1,4 @@
-# @otpy/mcp
+# @o-t-p-y/mcp
 
 Official Model Context Protocol (MCP) server for [OTPy.ir](https://otpy.ir) — interact with your OTPy account, inspect usage, send test codes, and manage keys directly from AI assistants.
 
@@ -24,7 +24,7 @@ Add to your `.cursor/mcp.json` or Cursor Settings → MCP:
   "mcpServers": {
     "otpy": {
       "command": "npx",
-      "args": ["-y", "@otpy/mcp"],
+      "args": ["-y", "@o-t-p-y/mcp"],
       "env": {
         "OTPY_API_KEY": "otpy_your_api_key_here",
         "OTPY_USER_KEY": "otpy_uk_your_user_key_here"
@@ -43,7 +43,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "otpy": {
       "command": "npx",
-      "args": ["-y", "@otpy/mcp"],
+      "args": ["-y", "@o-t-p-y/mcp"],
       "env": {
         "OTPY_API_KEY": "otpy_your_api_key_here",
         "OTPY_USER_KEY": "otpy_uk_your_user_key_here"
