@@ -1,5 +1,10 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import { createRequire } from "node:module";
+
+// Single source of truth for the server version: package.json. Read at runtime
+// (rootDir is src/, so a static JSON import of ../package.json would break tsc).
+export const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 // Task 30 (#13): the MCP server holds up to TWO credentials:
 //  - `apiKey`: the existing project-scoped `api_keys` credential (Task 2/#? --
@@ -60,11 +65,13 @@ export const TOOLS = [
   {
     name: "get_balance",
     description:
-      "Get the current wallet balance and pricing details. Requires a user_key with the 'billing' scope (see README).",
+      "Get the current wallet balance for a project. Requires a user_key with the 'billing' scope (see README).",
     inputSchema: {
       type: "object",
-      properties: {},
-      required: [],
+      properties: {
+        project_id: { type: "string", description: "Project ID." },
+      },
+      required: ["project_id"],
     },
   },
   {
@@ -74,9 +81,9 @@ export const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        project_id: { type: "string", description: "Optional project ID filter." },
+        project_id: { type: "string", description: "Project ID." },
       },
-      required: [],
+      required: ["project_id"],
     },
   },
   {
@@ -285,23 +292,21 @@ export async function handleToolCall(
   }
 
   if (name === "get_balance") {
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            {
-              default_otp_price_toman: 220,
-              free_daily_quota_payg: 10,
-              topup_minimum_toman: 100000,
-              dashboard_url: "https://dash.otpy.ir/balance",
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-    };
+    const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : null;
+    if (!projectId) {
+      return { isError: true, content: [{ type: "text", text: "Error: project_id is required." }] };
+    }
+    try {
+      const url = new URL(`${config.baseUrl}/v1/mcp-scope/balance`);
+      url.searchParams.set("project_id", projectId);
+      const res = await fetchFn(url.toString(), {
+        headers: { authorization: `Bearer ${config.userKey}` },
+      });
+      const data = await res.json();
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
+    }
   }
 
   if (name === "get_integration_snippet") {
@@ -312,8 +317,14 @@ export async function handleToolCall(
       snippet = `import requests\nres = requests.post("https://api.otpy.ir/v1/otp/send", json={"phone": "09123456789"}, headers={"Authorization": "Bearer ${key}"})\nprint(res.json())`;
     } else if (lang === "curl") {
       snippet = `curl -X POST https://api.otpy.ir/v1/otp/send -H "Authorization: Bearer ${key}" -H "Content-Type: application/json" -d '{"phone": "09123456789"}'`;
+    } else if (lang === "go") {
+      snippet = `package main\n\nimport (\n\t"bytes"\n\t"encoding/json"\n\t"fmt"\n\t"net/http"\n)\n\nfunc main() {\n\tpayload, _ := json.Marshal(map[string]string{"phone": "09123456789"})\n\treq, _ := http.NewRequest("POST", "https://api.otpy.ir/v1/otp/send", bytes.NewBuffer(payload))\n\treq.Header.Set("Authorization", "Bearer ${key}")\n\treq.Header.Set("Content-Type", "application/json")\n\tresp, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\tdefer resp.Body.Close()\n\tvar result map[string]any\n\tjson.NewDecoder(resp.Body).Decode(&result)\n\tfmt.Println(result)\n}`;
+    } else if (lang === "php") {
+      snippet = `<?php\nuse Illuminate\\Support\\Facades\\Http;\n\n$response = Http::withToken('${key}')\n    ->acceptJson()\n    ->post('https://api.otpy.ir/v1/otp/send', [\n        'phone' => '09123456789',\n    ]);\n\nreturn $response->json();`;
+    } else if (lang === "csharp") {
+      snippet = `using System.Net.Http;\nusing System.Net.Http.Headers;\nusing System.Text;\n\nusing var client = new HttpClient();\nclient.DefaultRequestHeaders.Authorization =\n    new AuthenticationHeaderValue("Bearer", "${key}");\n\nvar content = new StringContent(\n    "{\\"phone\\":\\"09123456789\\"}",\n    Encoding.UTF8,\n    "application/json");\n\nvar response = await client.PostAsync("https://api.otpy.ir/v1/otp/send", content);\nvar body = await response.Content.ReadAsStringAsync();\nConsole.WriteLine(body);`;
     } else {
-      snippet = `import { OtpyClient } from "otpy";\nconst otpy = new OtpyClient({ apiKey: "${key}" });\nawait otpy.sendOtp("09123456789");`;
+      snippet = `import { OtpyClient } from "@o-t-p-y/sdk";\nconst otpy = new OtpyClient({ apiKey: "${key}" });\nawait otpy.sendOtp("09123456789");`;
     }
     return { content: [{ type: "text", text: snippet }] };
   }
@@ -358,16 +369,46 @@ export async function handleToolCall(
     }
   }
 
-  // `list_api_keys` and `create_api_key` are declared in TOOLS (and are fully
-  // scope-gated above, real verification and all) but the underlying API
-  // routes they'd call (/v1/projects/:projectId/api-keys) are session-Bearer
-  // authenticated (dash-UI-facing), same architectural mismatch as Task 13's
-  // introspection endpoint -- the MCP server has neither a session nor a
-  // matching credential for those routes yet. Wiring an actual network call
-  // for them is out of this task's scope (#13/Task 30 is specifically about
-  // replacing the client-only write flag with real scope verification, not
-  // adding new tool bodies); they fall through to "Unknown tool" below, same
-  // as before this change.
+  if (name === "list_api_keys") {
+    const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : null;
+    if (!projectId) {
+      return { isError: true, content: [{ type: "text", text: "Error: project_id is required." }] };
+    }
+    try {
+      const res = await fetchFn(`${config.baseUrl}/v1/mcp-scope/projects/${projectId}/api-keys`, {
+        headers: { authorization: `Bearer ${config.userKey}` },
+      });
+      const data = await res.json();
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
+    }
+  }
+
+  if (name === "create_api_key") {
+    const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : null;
+    if (!projectId) {
+      return { isError: true, content: [{ type: "text", text: "Error: project_id is required." }] };
+    }
+    const body: Record<string, unknown> = { name: String(args.name ?? "") };
+    for (const key of ["limit_daily_otp", "limit_weekly_otp", "limit_monthly_otp"] as const) {
+      if (typeof args[key] === "number") body[key] = args[key];
+    }
+    try {
+      const res = await fetchFn(`${config.baseUrl}/v1/mcp-scope/projects/${projectId}/api-keys`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${config.userKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
+    }
+  }
 
   return { isError: true, content: [{ type: "text", text: `Unknown tool: ${name}` }] };
 }
@@ -409,7 +450,7 @@ export function startMcpServer(
             capabilities: { tools: {} },
             serverInfo: {
               name: "otpy-mcp",
-              version: "0.1.0",
+              version: SERVER_VERSION,
             },
           },
         }) + "\n",

@@ -193,12 +193,55 @@ describe("otpy mcp server", () => {
     });
 
     it("permits a billing tool (get_balance) when the server reports billing:true", async () => {
-      const scopeFetch = vi.fn(async () =>
+      const fetchFn = vi
+        .fn()
+        .mockImplementationOnce(async () =>
+          jsonResponse({ user_key_id: "uk1", write: false, billing: true, root: false, enabled: true }),
+        )
+        .mockImplementationOnce(async () => jsonResponse({ balance_toman: 5000 }));
+
+      const res = await handleToolCall(
+        "get_balance",
+        { project_id: "proj_1" },
+        baseConfig,
+        fetchFn as unknown as typeof fetch,
+      );
+
+      expect(res.isError).toBeFalsy();
+      expect(res.content[0]?.text).toContain("balance_toman");
+      const [url, init] = fetchFn.mock.calls[1]!;
+      expect(String(url)).toBe("https://api.otpy.ir/v1/mcp-scope/balance?project_id=proj_1");
+      expect((init as RequestInit).headers).toMatchObject({ authorization: "Bearer test_user_key" });
+    });
+
+    it("rejects get_balance without project_id after the scope gate passes", async () => {
+      const fetchFn = vi.fn(async () =>
         jsonResponse({ user_key_id: "uk1", write: false, billing: true, root: false, enabled: true }),
       );
-      const res = await handleToolCall("get_balance", {}, baseConfig, scopeFetch as unknown as typeof fetch);
+      const res = await handleToolCall("get_balance", {}, baseConfig, fetchFn as unknown as typeof fetch);
+      expect(res.isError).toBe(true);
+      expect(res.content[0]?.text).toContain("project_id is required");
+    });
+
+    it("wires list_api_keys to GET /v1/mcp-scope/projects/:projectId/api-keys", async () => {
+      const fetchFn = vi
+        .fn()
+        .mockImplementationOnce(async () =>
+          jsonResponse({ user_key_id: "uk1", write: false, billing: true, root: false, enabled: true }),
+        )
+        .mockImplementationOnce(async () => jsonResponse({ api_keys: [{ id: "ak_1", name: "default" }] }));
+
+      const res = await handleToolCall(
+        "list_api_keys",
+        { project_id: "proj_1" },
+        baseConfig,
+        fetchFn as unknown as typeof fetch,
+      );
+
       expect(res.isError).toBeFalsy();
-      expect(res.content[0]?.text).toContain("default_otp_price_toman");
+      const [url] = fetchFn.mock.calls[1]!;
+      expect(String(url)).toBe("https://api.otpy.ir/v1/mcp-scope/projects/proj_1/api-keys");
+      expect(res.content[0]?.text).toContain("ak_1");
     });
 
     it("denies write tools requiring project access when project_allowed is false for the given project_id", async () => {
@@ -224,29 +267,37 @@ describe("otpy mcp server", () => {
       expect(res.content[0]?.text).toContain("not granted access");
     });
 
-    it("permits access when project_allowed is true (or unrestricted / not applicable)", async () => {
-      const fetchFn = vi.fn(async () =>
-        jsonResponse({
-          user_key_id: "uk1",
-          write: true,
-          billing: false,
-          root: false,
-          enabled: true,
-          project_allowed: true,
-        }),
-      );
+    it("wires create_api_key to POST /v1/mcp-scope/projects/:projectId/api-keys when the gate passes", async () => {
+      const fetchFn = vi
+        .fn()
+        .mockImplementationOnce(async () =>
+          jsonResponse({
+            user_key_id: "uk1",
+            write: true,
+            billing: false,
+            root: false,
+            enabled: true,
+            project_allowed: true,
+          }),
+        )
+        .mockImplementationOnce(async () =>
+          jsonResponse({ api_key_id: "ak_new", api_key: "otpy_secret_once", key_prefix: "otpy_secr", version: 0 }),
+        );
 
-      // create_api_key falls through to "Unknown tool" past the gate (no live handler wired
-      // for it yet -- same as before this task), which is exactly how we know the gate itself
-      // let it through: an error mentioning scopes/project would mean the gate blocked it.
       const res = await handleToolCall(
         "create_api_key",
-        { project_id: "proj_granted", name: "x" },
+        { project_id: "proj_granted", name: "x", limit_daily_otp: 100 },
         baseConfig,
         fetchFn as unknown as typeof fetch,
       );
 
-      expect(res.content[0]?.text).toBe("Unknown tool: create_api_key");
+      expect(res.isError).toBeFalsy();
+      const [url, init] = fetchFn.mock.calls[1]!;
+      expect(String(url)).toBe("https://api.otpy.ir/v1/mcp-scope/projects/proj_granted/api-keys");
+      expect((init as RequestInit).method).toBe("POST");
+      expect((init as RequestInit).headers).toMatchObject({ authorization: "Bearer test_user_key" });
+      expect(JSON.parse(String((init as RequestInit).body))).toEqual({ name: "x", limit_daily_otp: 100 });
+      expect(res.content[0]?.text).toContain("ak_new");
     });
 
     it("executes read tools (get_usage) regardless of scopes, without calling scope verification", async () => {
