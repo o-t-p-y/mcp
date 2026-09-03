@@ -24,7 +24,7 @@ jobs:
             echo "Wiki repo not initialized yet — creating it"
             mkdir -p "$WORK/wiki"
             cd "$WORK/wiki"
-            git init -b main
+            git init -b master
           }
           cd "$WORK/wiki"
           rsync -a --delete --exclude='.git' "$GITHUB_WORKSPACE/docs/wiki/" ./
@@ -38,4 +38,4 @@ jobs:
           git commit -m "docs(wiki): sync from docs/wiki @ ${{ github.sha }}"
           git remote remove origin 2>/dev/null || true
           git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git"
-          git push -u origin main --force-with-lease
+          git push -u origin HEAD:master --force-with-lease
