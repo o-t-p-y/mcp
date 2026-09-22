@@ -57,11 +57,46 @@ export function parseConfig(
 export const TOOLS = [
   {
     name: "get_usage",
-    description: "Get today's OTP usage statistics (free used, free quota, paid count, daily limit).",
+    description:
+      "Get OTP usage statistics. Without dates, values cover today. With both from and to (required together), free_used_today and paid_today are totals for the inclusive range up to 90 days, while free_quota_today and daily_limit remain the current plan limits.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        from: { type: "string", format: "date", description: "Inclusive start date (YYYY-MM-DD); required together with to." },
+        to: { type: "string", format: "date", description: "Inclusive end date (YYYY-MM-DD); required together with from." },
+      },
       required: [],
+    },
+  },
+  {
+    name: "list_projects",
+    description: "List the projects visible to the configured OTPY_USER_KEY. This is a read-only user-key operation.",
+    inputSchema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "list_otp_messages",
+    description:
+      "List recent OTP messages for a project. Requires an enabled OTPY_USER_KEY, but no write or billing scope. Status is internal processing state and does not provide carrier delivery receipts; verified_at marks user verification.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "Project ID." },
+        limit: { type: "integer", minimum: 1, maximum: 100, description: "Number of messages to return (default 50, maximum 100)." },
+      },
+      required: ["project_id"],
+    },
+  },
+  {
+    name: "list_transactions",
+    description:
+      "List recent wallet ledger transactions for a project. Requires an enabled OTPY_USER_KEY with the billing scope. Amounts are in tomans.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "Project ID." },
+        limit: { type: "integer", minimum: 1, maximum: 100, description: "Number of transactions to return (default 50, maximum 100)." },
+      },
+      required: ["project_id"],
     },
   },
   {
@@ -151,7 +186,8 @@ const WRITE_TOOLS = ["send_test_otp", "verify_test_otp", "create_api_key"];
 // Tools requiring the `billing` scope on the presented user_key.
 // Mapping per the plan: billing -> get_balance/list_api_keys/topup endpoints.
 // `root` is never a separate gate -- it is just "has both write AND billing".
-const BILLING_TOOLS = ["get_balance", "list_api_keys"];
+const BILLING_TOOLS = ["get_balance", "list_api_keys", "list_transactions"];
+const USER_KEY_TOOLS = ["list_projects", "list_otp_messages", "list_transactions"];
 
 export interface UserKeyScopes {
   write: boolean;
@@ -242,38 +278,39 @@ export async function handleToolCall(
 ): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
   const needsWrite = WRITE_TOOLS.includes(name);
   const needsBilling = BILLING_TOOLS.includes(name);
+  const needsUserKey = USER_KEY_TOOLS.includes(name);
 
-  if (needsWrite || needsBilling) {
+  if (needsWrite || needsBilling || needsUserKey) {
     const projectId = typeof args.project_id === "string" ? args.project_id : undefined;
     const verification = await verifyUserKeyScopes(config, fetchFn, projectId);
 
     if (!verification.ok) {
       return scopeDeniedResult(
-        `❌ Could not verify this MCP connection's user_key scopes: ${verification.reason}\nConfigure a valid user_key (OTPY_USER_KEY / --user-key), obtained from the "Integrate" tab on https://dash.otpy.ir.`,
+        `❌ Could not verify this MCP connection's user_key scopes: ${verification.reason}\nConfigure a valid user_key (OTPY_USER_KEY / --user-key), obtained from the "Integration" page at https://dash.otpy.ir/integrate.`,
       );
     }
 
     if (!verification.scopes.enabled) {
       return scopeDeniedResult(
-        `❌ No valid user_key is configured for this MCP connection.\nThis tool requires a user_key with the required scope. Create one on the "Integrate" tab at https://dash.otpy.ir and set OTPY_USER_KEY (or --user-key).`,
+        `❌ No valid user_key is configured for this MCP connection.\nThis tool requires a user_key with the required scope. Create one on the "Integration" page at https://dash.otpy.ir/integrate and set OTPY_USER_KEY (or --user-key).`,
       );
     }
 
     if (needsWrite && !verification.scopes.write) {
       return scopeDeniedResult(
-        `❌ This MCP connection's user_key does not have the 'write' scope.\nWrite actions (sending test OTPs, creating/modifying keys) require a user_key with write enabled. Configure this on the "Integrate" tab at https://dash.otpy.ir.`,
+        `❌ This MCP connection's user_key does not have the 'write' scope.\nWrite actions (sending test OTPs, creating/modifying keys) require a user_key with write enabled. Configure this on the "Integration" page at https://dash.otpy.ir/integrate.`,
       );
     }
 
     if (needsBilling && !verification.scopes.billing) {
       return scopeDeniedResult(
-        `❌ This MCP connection's user_key does not have the 'billing' scope.\nBilling-related reads (balance, API key listing) require a user_key with billing enabled. Configure this on the "Integrate" tab at https://dash.otpy.ir.`,
+        `❌ This MCP connection's user_key does not have the 'billing' scope.\nBilling-related reads (balance, API key listing) require a user_key with billing enabled. Configure this on the "Integration" page at https://dash.otpy.ir/integrate.`,
       );
     }
 
     if (projectId && verification.projectAllowed === false) {
       return scopeDeniedResult(
-        `❌ This MCP connection's user_key is not granted access to project ${projectId}.\nEither omit project_id, or grant this user_key access to that project on the "Integrate" tab at https://dash.otpy.ir.`,
+        `❌ This MCP connection's user_key is not granted access to project ${projectId}.\nEither omit project_id, or grant this user_key access to that project on the "Integration" page at https://dash.otpy.ir/integrate.`,
       );
     }
   }
@@ -283,11 +320,53 @@ export async function handleToolCall(
       return { isError: true, content: [{ type: "text", text: "Error: OTPY_API_KEY is not configured." }] };
     }
     try {
-      const res = await fetchFn(`${config.baseUrl}/v1/usage`, {
+      const url = new URL(`${config.baseUrl}/v1/usage`);
+      if (typeof args.from === "string") url.searchParams.set("from", args.from);
+      if (typeof args.to === "string") url.searchParams.set("to", args.to);
+      const res = await fetchFn(url.toString(), {
         headers: { authorization: `Bearer ${config.apiKey}` },
       });
       const data = await res.json();
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      return { isError: !res.ok, content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
+    }
+  }
+
+  if (name === "list_projects") {
+    try {
+      const res = await fetchFn(`${config.baseUrl}/v1/mcp-scope/projects`, {
+        headers: { authorization: `Bearer ${config.userKey}` },
+      });
+      const data = await res.json();
+      return { isError: !res.ok, content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (err) {
+      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
+    }
+  }
+
+  if (name === "list_otp_messages" || name === "list_transactions") {
+    const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : null;
+    if (!projectId) {
+      return { isError: true, content: [{ type: "text", text: "Error: project_id is required." }] };
+    }
+
+    const limit = typeof args.limit === "number" ? args.limit : 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      return { isError: true, content: [{ type: "text", text: "Error: limit must be an integer between 1 and 100." }] };
+    }
+
+    const endpoint = name === "list_otp_messages" ? "otp-messages" : "ledger";
+    const url = new URL(
+      `${config.baseUrl}/v1/mcp-scope/projects/${encodeURIComponent(projectId)}/${endpoint}`,
+    );
+    url.searchParams.set("limit", String(limit));
+    try {
+      const res = await fetchFn(url.toString(), {
+        headers: { authorization: `Bearer ${config.userKey}` },
+      });
+      const data = await res.json();
+      return { isError: !res.ok, content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
     }
@@ -313,20 +392,19 @@ export async function handleToolCall(
 
   if (name === "get_integration_snippet") {
     const lang = String(args.language || "nodejs");
-    const key = config.apiKey || "otpy_your_api_key";
     let snippet = "";
     if (lang === "python") {
-      snippet = `import requests\nres = requests.post("https://api.otpy.ir/v1/otp/send", json={"phone": "09123456789"}, headers={"Authorization": "Bearer ${key}"})\nprint(res.json())`;
+      snippet = `import os\nimport requests\n\nres = requests.post("https://api.otpy.ir/v1/otp/send", json={"phone": "09123456789"}, headers={"Authorization": f"Bearer {os.environ['OTPY_API_KEY']}"})\nprint(res.json())`;
     } else if (lang === "curl") {
-      snippet = `curl -X POST https://api.otpy.ir/v1/otp/send -H "Authorization: Bearer ${key}" -H "Content-Type: application/json" -d '{"phone": "09123456789"}'`;
+      snippet = `curl -X POST https://api.otpy.ir/v1/otp/send -H "Authorization: Bearer $OTPY_API_KEY" -H "Content-Type: application/json" -d '{"phone": "09123456789"}'`;
     } else if (lang === "go") {
-      snippet = `package main\n\nimport (\n\t"bytes"\n\t"encoding/json"\n\t"fmt"\n\t"net/http"\n)\n\nfunc main() {\n\tpayload, _ := json.Marshal(map[string]string{"phone": "09123456789"})\n\treq, _ := http.NewRequest("POST", "https://api.otpy.ir/v1/otp/send", bytes.NewBuffer(payload))\n\treq.Header.Set("Authorization", "Bearer ${key}")\n\treq.Header.Set("Content-Type", "application/json")\n\tresp, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\tdefer resp.Body.Close()\n\tvar result map[string]any\n\tjson.NewDecoder(resp.Body).Decode(&result)\n\tfmt.Println(result)\n}`;
+      snippet = `package main\n\nimport (\n\t"bytes"\n\t"encoding/json"\n\t"fmt"\n\t"net/http"\n\t"os"\n)\n\nfunc main() {\n\tpayload, _ := json.Marshal(map[string]string{"phone": "09123456789"})\n\treq, _ := http.NewRequest("POST", "https://api.otpy.ir/v1/otp/send", bytes.NewBuffer(payload))\n\treq.Header.Set("Authorization", "Bearer "+os.Getenv("OTPY_API_KEY"))\n\treq.Header.Set("Content-Type", "application/json")\n\tresp, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\tpanic(err)\n\t}\n\tdefer resp.Body.Close()\n\tvar result map[string]any\n\tjson.NewDecoder(resp.Body).Decode(&result)\n\tfmt.Println(result)\n}`;
     } else if (lang === "php") {
-      snippet = `<?php\nuse Illuminate\\Support\\Facades\\Http;\n\n$response = Http::withToken('${key}')\n    ->acceptJson()\n    ->post('https://api.otpy.ir/v1/otp/send', [\n        'phone' => '09123456789',\n    ]);\n\nreturn $response->json();`;
+      snippet = `<?php\nuse Illuminate\\Support\\Facades\\Http;\n\n$response = Http::withToken(env('OTPY_API_KEY', ''))\n    ->acceptJson()\n    ->post('https://api.otpy.ir/v1/otp/send', [\n        'phone' => '09123456789',\n    ]);\n\nreturn $response->json();`;
     } else if (lang === "csharp") {
-      snippet = `using System.Net.Http;\nusing System.Net.Http.Headers;\nusing System.Text;\n\nusing var client = new HttpClient();\nclient.DefaultRequestHeaders.Authorization =\n    new AuthenticationHeaderValue("Bearer", "${key}");\n\nvar content = new StringContent(\n    "{\\"phone\\":\\"09123456789\\"}",\n    Encoding.UTF8,\n    "application/json");\n\nvar response = await client.PostAsync("https://api.otpy.ir/v1/otp/send", content);\nvar body = await response.Content.ReadAsStringAsync();\nConsole.WriteLine(body);`;
+      snippet = `using System;\nusing System.Net.Http;\nusing System.Net.Http.Headers;\nusing System.Text;\n\nusing var client = new HttpClient();\nclient.DefaultRequestHeaders.Authorization =\n    new AuthenticationHeaderValue("Bearer", Environment.GetEnvironmentVariable("OTPY_API_KEY"));\n\nvar content = new StringContent(\n    "{\\"phone\\":\\"09123456789\\"}",\n    Encoding.UTF8,\n    "application/json");\n\nvar response = await client.PostAsync("https://api.otpy.ir/v1/otp/send", content);\nvar body = await response.Content.ReadAsStringAsync();\nConsole.WriteLine(body);`;
     } else {
-      snippet = `import { OtpyClient } from "@o-t-p-y/sdk";\nconst otpy = new OtpyClient({ apiKey: "${key}" });\nawait otpy.sendOtp("09123456789");`;
+      snippet = `import { OtpyClient } from "@o-t-p-y/sdk";\nconst otpy = new OtpyClient({ apiKey: process.env.OTPY_API_KEY! });\nawait otpy.sendOtp("09123456789");`;
     }
     return { content: [{ type: "text", text: snippet }] };
   }

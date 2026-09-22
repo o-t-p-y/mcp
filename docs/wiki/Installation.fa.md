@@ -8,7 +8,7 @@
 
 - Node.js 18+ (برای `npx`)
 - یک کلید API پروژه OTPy (`otpy_...`) — از تنظیمات پروژه در [dash.otpy.ir](https://dash.otpy.ir)
-- اختیاری ولی توصیه‌شده: یک کلید کاربری (`otpy_uk_...`) با اسکوپ‌های موردنیاز — از تب **Integrate** در [dash.otpy.ir](https://dash.otpy.ir). سکرت خام فقط یک بار هنگام ساخت نمایش داده می‌شود.
+- یک کلید کاربری (`otpy_uk_...`) برای خواندن پروژه و اسکوپ‌های موردنیاز — از صفحه‌ی **Integration** (`/integrate`) در [dash.otpy.ir](https://dash.otpy.ir). سکرت خام فقط یک بار هنگام ساخت نمایش داده می‌شود.
 
 ## Cursor
 

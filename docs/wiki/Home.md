@@ -7,14 +7,15 @@ Official Model Context Protocol server for [OTPy.ir](https://otpy.ir) — use yo
 The server exposes OTPy tools over MCP stdio:
 
 - **Read tools** (project API key only): `get_usage`, `get_integration_snippet`
-- **Billing tools** (user key with `billing` scope): `get_balance`, `list_api_keys`
+- **Project read tools** (enabled user key): `list_projects`, `list_otp_messages`
+- **Billing tools** (user key with `billing` scope): `get_balance`, `list_api_keys`, `list_transactions`
 - **Write tools** (user key with `write` scope): `send_test_otp`, `verify_test_otp`, `create_api_key`
 
 All scope checks are verified live against the OTPy API on every call — there is no client-side override.
 
 ## Pages
 
-- [Installation](Installation) — Cursor and Claude Desktop setup
+- [Installation](Installation) — Cursor, Claude Desktop, and Kilo setup
 - [Tools](Tools) — full tool reference with inputs and outputs
 - [Scopes](Scopes) — the `user_keys` scope model (`write`, `billing`, derived `root`, project grants)
 
@@ -29,7 +30,7 @@ Configure it in your MCP client with two credentials:
 | Env var | Credential | Where to get it |
 |---|---|---|
 | `OTPY_API_KEY` | Project API key (`otpy_...`) | Project settings on [dash.otpy.ir](https://dash.otpy.ir) |
-| `OTPY_USER_KEY` | User key (`otpy_uk_...`) | **Integrate** tab on [dash.otpy.ir](https://dash.otpy.ir) |
+| `OTPY_USER_KEY` | User key (`otpy_uk_...`) | **Integration** page (`/integrate`) on [dash.otpy.ir](https://dash.otpy.ir) |
 
 See [Installation](Installation) for complete client configs.
 

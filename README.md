@@ -8,10 +8,10 @@ This server can use up to two different OTPy credentials, each for a different p
 
 | Credential | Env var / flag | What it's for |
 |---|---|---|
-| **API key** (project-scoped) | `OTPY_API_KEY` / `--api-key` | Read/write access to OTP-related endpoints: `get_usage`, `send_test_otp`, `verify_test_otp`, `get_integration_snippet`. This is the same `otpy_...` key you use to send real OTPs from your product. |
-| **User key** (user-scoped) | `OTPY_USER_KEY` / `--user-key` | Real, server-verified scope gating for write- and billing-sensitive tools (see below). This is a separate `otpy_uk_...` secret, obtained from the **Integrate** tab on [dash.otpy.ir](https://dash.otpy.ir). |
+| **API key** (project-scoped) | `OTPY_API_KEY` / `--api-key` | Authenticates the OTP API and usage calls: `get_usage`, `send_test_otp`, `verify_test_otp`. This is the same `otpy_...` key you use to send real OTPs from your product. |
+| **User key** (user-scoped) | `OTPY_USER_KEY` / `--user-key` | Authenticates project reads and provides live scope gating for billing/write tools. This is a separate `otpy_uk_...` secret, obtained from the **Integration** page (`/integrate`) on [dash.otpy.ir](https://dash.otpy.ir). |
 
-You do not strictly need a user key to use the read-only tools (`get_usage`, `get_integration_snippet`) — only the API key is required for those. But any tool that requires the `write` or `billing` scope (see below) is denied outright if no user key is configured.
+The API-key-only tools are `get_usage` and `get_integration_snippet`. Project reads (`list_projects`, `list_otp_messages`) use the enabled user key, while `list_transactions` also requires its `billing` scope. Any tool that requires a user key is denied outright if none is configured.
 
 ## Installation / Setup
 
@@ -53,7 +53,7 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-You can also copy the pre-configured MCP snippet directly from the **Integrate** tab on [dash.otpy.ir](https://dash.otpy.ir).
+You can also copy the pre-configured MCP snippet directly from the **Integration** page (`/integrate`) on [dash.otpy.ir](https://dash.otpy.ir).
 
 ## Scope model (`user_keys`)
 
@@ -62,10 +62,10 @@ Every user key has exactly two independently toggleable scopes, `write` and `bil
 | Scope | Grants |
 |---|---|
 | `write` | `send_test_otp`, `verify_test_otp`, `create_api_key` |
-| `billing` | `get_balance`, `list_api_keys` |
+| `billing` | `get_balance`, `list_api_keys`, `list_transactions` |
 | `root` (derived: `write` and `billing` both true) | Everything above — not a separate scope, just shorthand for "has both". |
 
-Create a user key with the scopes you need on the **Integrate** tab of [dash.otpy.ir](https://dash.otpy.ir) (create/list/revoke and toggling `write`/`billing` all live there). The raw `otpy_uk_...` secret is shown exactly once at creation time — copy it into `OTPY_USER_KEY` immediately.
+Create a user key with the scopes you need on the **Integration** page (`/integrate`) of [dash.otpy.ir](https://dash.otpy.ir) (create/list/revoke and toggling `write`/`billing` all live there). The raw `otpy_uk_...` secret is shown exactly once at creation time — copy it into `OTPY_USER_KEY` immediately.
 
 ### How scope verification actually works
 
@@ -73,11 +73,11 @@ Every call to a `write`- or `billing`-gated tool makes a **real, live network re
 
 **There is no client-side override of any kind.** Earlier versions of this server had a local `OTPY_MCP_WRITE` / `--write` flag that only ever lived in this process's own config — it was never verified against the server, so anyone with shell/env access to their own MCP client could set it and bypass write-tool gating entirely. That flag has been removed outright (not deprecated, not silently downgraded to "restrict only" — deleted). If you still have `OTPY_MCP_WRITE`/`--write` set in an old config, it is now a complete no-op: `parseConfig` doesn't read it at all, and the only thing that can grant write/billing access is a real `user_key` with the matching scope, verified over the network on every call.
 
-If no `OTPY_USER_KEY` is configured at all, every `write`/`billing`-gated tool is denied (fails closed) — only the unscoped read tools (`get_usage`, `get_integration_snippet`) keep working with just an API key.
+If no `OTPY_USER_KEY` is configured at all, every user-key tool is denied (fails closed) — only the unscoped read tools (`get_usage`, `get_integration_snippet`) keep working with the project API key.
 
 ### Project grants
 
-A user key can optionally be restricted to specific projects (`user_project_grants`, set on the same Integrate tab). The rule:
+A user key can optionally be restricted to specific projects (`user_project_grants`, set on the same Integration page). The rule:
 
 - **Zero grant rows** → unrestricted: the key can act on any project its owner can reach.
 - **One or more grant rows** → restricted to exactly those project ids.
@@ -88,13 +88,18 @@ Whenever a tool call includes a `project_id` argument, the server checks this al
 
 | Tool | Required scope | Description |
 |---|---|---|
-| `get_usage` | none | Daily quota and free/paid usage breakdown |
+| `get_usage` | none | Today's usage, or usage for an inclusive date range up to 90 days |
+| `list_projects` | user key | List projects visible to the user key |
+| `list_otp_messages` | user key | List messages; status is internal and `verified_at` marks verification, not carrier delivery |
+| `list_transactions` | `billing` | List wallet ledger transactions in tomans |
 | `get_balance` | `billing` | Current wallet balance and pricing details |
 | `list_api_keys` | `billing` | List project API keys and limits |
 | `get_integration_snippet` | none | Generate copyable code snippets |
 | `send_test_otp` | `write` | Send a test OTP code to a phone number |
 | `verify_test_otp` | `write` | Verify a test OTP code |
 | `create_api_key` | `write` | Create a new API key with custom limits |
+
+Integration snippets always read `OTPY_API_KEY` from the runtime environment; the MCP server never embeds the configured raw API key in generated code.
 
 ## License
 

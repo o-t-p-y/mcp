@@ -26,7 +26,7 @@ If no `OTPY_USER_KEY` is configured, every `write`/`billing`-gated tool fails cl
 
 ## Project grants
 
-A user key can optionally be restricted to specific projects (`user_project_grants`, managed on the **Integrate** tab):
+A user key can optionally be restricted to specific projects (`user_project_grants`, managed on the **Integration** page at `/integrate`):
 
 - **Zero grant rows** → unrestricted: the key can act on any project its owner can reach.
 - **One or more grant rows** → restricted to exactly those project IDs.
@@ -44,7 +44,7 @@ All authorization lives in Postgres `SECURITY DEFINER` functions — never in ap
 
 ## Getting a user key
 
-1. Open the **Integrate** tab on [dash.otpy.ir](https://dash.otpy.ir).
+1. Open the **Integration** page (`/integrate`) on [dash.otpy.ir](https://dash.otpy.ir).
 2. Create a user key with the scopes you need (`write`, `billing`, or both).
 3. Copy the raw `otpy_uk_...` secret immediately — it is shown exactly once.
 4. Set it as `OTPY_USER_KEY` (or `--user-key`) in your MCP client config.

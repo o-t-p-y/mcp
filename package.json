@@ -1,6 +1,6 @@
 {
   "name": "@o-t-p-y/mcp",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "type": "module",
   "description": "OTPy MCP server — agent-driven integration path. Implemented in P5.",
   "license": "MIT",

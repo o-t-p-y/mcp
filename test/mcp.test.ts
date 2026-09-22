@@ -58,7 +58,18 @@ describe("otpy mcp server", () => {
     it("lists read and write tools", () => {
       expect(TOOLS.some((t) => t.name === "get_usage")).toBe(true);
       expect(TOOLS.some((t) => t.name === "get_balance")).toBe(true);
+      expect(TOOLS.some((t) => t.name === "list_projects")).toBe(true);
+      expect(TOOLS.some((t) => t.name === "list_otp_messages")).toBe(true);
+      expect(TOOLS.some((t) => t.name === "list_transactions")).toBe(true);
       expect(TOOLS.some((t) => t.name === "send_test_otp")).toBe(true);
+    });
+
+    it("documents internal message status and verified_at without claiming carrier receipts", () => {
+      const tool = TOOLS.find((t) => t.name === "list_otp_messages")!;
+      expect(tool.description).toMatch(/internal/);
+      expect(tool.description).toMatch(/carrier delivery receipts/);
+      expect(tool.description).toMatch(/verified_at/);
+      expect(tool.inputSchema.properties.limit).toMatchObject({ type: "integer", minimum: 1, maximum: 100 });
     });
 
     it("no longer references the old Write Mode / dashboard-toggle mechanism in tool descriptions", () => {
@@ -324,6 +335,119 @@ describe("otpy mcp server", () => {
         "https://api.otpy.ir/v1/usage",
         expect.objectContaining({ headers: { authorization: "Bearer test_api_key" } }),
       );
+    });
+
+    it("passes an optional usage date range to the API", async () => {
+      const mockFetch = vi.fn(async () => jsonResponse({ free_used_today: 2 }));
+
+      const res = await handleToolCall(
+        "get_usage",
+        { from: "2026-09-01", to: "2026-09-07" },
+        baseConfig,
+        mockFetch as unknown as typeof fetch,
+      );
+
+      expect(res.isError).toBeFalsy();
+      expect(String(mockFetch.mock.calls[0]?.[0])).toBe(
+        "https://api.otpy.ir/v1/usage?from=2026-09-01&to=2026-09-07",
+      );
+    });
+
+    it("marks API authorization failures as MCP tool errors", async () => {
+      const usage = await handleToolCall(
+        "get_usage",
+        {},
+        baseConfig,
+        vi.fn(async () => jsonResponse({ error: "unauthorized" }, 401)) as unknown as typeof fetch,
+      );
+      expect(usage.isError).toBe(true);
+
+      const projectsFetch = vi
+        .fn()
+        .mockImplementationOnce(async () => jsonResponse({ write: false, billing: false, enabled: true }))
+        .mockImplementationOnce(async () => jsonResponse({ error: "forbidden" }, 403));
+      const projects = await handleToolCall("list_projects", {}, baseConfig, projectsFetch as unknown as typeof fetch);
+      expect(projects.isError).toBe(true);
+    });
+
+    it("lists projects through the user-key read surface", async () => {
+      const fetchFn = vi
+        .fn()
+        .mockImplementationOnce(async () => jsonResponse({ write: false, billing: false, enabled: true }))
+        .mockImplementationOnce(async () => jsonResponse({ projects: [{ id: "p1", name: "Demo" }] }));
+
+      const res = await handleToolCall("list_projects", {}, baseConfig, fetchFn as unknown as typeof fetch);
+
+      expect(res.isError).toBeFalsy();
+      expect(String(fetchFn.mock.calls[1]?.[0])).toBe("https://api.otpy.ir/v1/mcp-scope/projects");
+      expect((fetchFn.mock.calls[1]?.[1] as RequestInit).headers).toMatchObject({
+        authorization: "Bearer test_user_key",
+      });
+      expect(res.content[0]?.text).toContain("Demo");
+    });
+
+    it("lists OTP messages with a bounded limit and project grant check", async () => {
+      const fetchFn = vi
+        .fn()
+        .mockImplementationOnce(async () =>
+          jsonResponse({ write: false, billing: false, enabled: true, project_allowed: true }),
+        )
+        .mockImplementationOnce(async () =>
+          jsonResponse({ messages: [{ status: "sent", verified_at: null }] }),
+        );
+
+      const res = await handleToolCall(
+        "list_otp_messages",
+        { project_id: "project-1", limit: 25 },
+        baseConfig,
+        fetchFn as unknown as typeof fetch,
+      );
+
+      expect(res.isError).toBeFalsy();
+      expect(String(fetchFn.mock.calls[1]?.[0])).toBe(
+        "https://api.otpy.ir/v1/mcp-scope/projects/project-1/otp-messages?limit=25",
+      );
+      expect(res.content[0]?.text).toContain("verified_at");
+    });
+
+    it("lists ledger transactions only after billing scope verification", async () => {
+      const fetchFn = vi
+        .fn()
+        .mockImplementationOnce(async () =>
+          jsonResponse({ write: false, billing: true, enabled: true, project_allowed: true }),
+        )
+        .mockImplementationOnce(async () =>
+          jsonResponse({ transactions: [{ amount_toman: 220, direction: -1 }] }),
+        );
+
+      const res = await handleToolCall(
+        "list_transactions",
+        { project_id: "project-1" },
+        baseConfig,
+        fetchFn as unknown as typeof fetch,
+      );
+
+      expect(res.isError).toBeFalsy();
+      expect(String(fetchFn.mock.calls[1]?.[0])).toBe(
+        "https://api.otpy.ir/v1/mcp-scope/projects/project-1/ledger?limit=50",
+      );
+      expect((fetchFn.mock.calls[1]?.[1] as RequestInit).headers).toMatchObject({
+        authorization: "Bearer test_user_key",
+      });
+    });
+
+    it("never embeds the raw API key in integration snippets", async () => {
+      const rawKey = "otpy_super_secret_should_not_appear";
+      for (const language of ["nodejs", "python", "go", "php", "curl", "csharp"]) {
+        const res = await handleToolCall(
+          "get_integration_snippet",
+          { language },
+          { ...baseConfig, apiKey: rawKey },
+          vi.fn() as unknown as typeof fetch,
+        );
+        expect(res.content[0]?.text).not.toContain(rawKey);
+        expect(res.content[0]?.text).toContain("OTPY_API_KEY");
+      }
     });
   });
 

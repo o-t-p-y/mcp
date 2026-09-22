@@ -6,7 +6,7 @@ The OTPy MCP server runs over stdio via `npx` — no global install required.
 
 - Node.js 18+ (for `npx`)
 - An OTPy project API key (`otpy_...`) — from project settings on [dash.otpy.ir](https://dash.otpy.ir)
-- Optional but recommended: a user key (`otpy_uk_...`) with the scopes you need — from the **Integrate** tab on [dash.otpy.ir](https://dash.otpy.ir). The raw secret is shown exactly once at creation.
+- A user key (`otpy_uk_...`) is required for project reads and the scopes you need — from the **Integration** page (`/integrate`) on [dash.otpy.ir](https://dash.otpy.ir). The raw secret is shown exactly once at creation.
 
 ## Cursor
 
@@ -46,6 +46,25 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
+## Kilo
+
+Kilo uses a top-level `mcp` key, an array `command`, and `environment`:
+
+```json
+{
+  "mcp": {
+    "otpy": {
+      "type": "local",
+      "command": ["npx", "-y", "@o-t-p-y/mcp"],
+      "environment": {
+        "OTPY_API_KEY": "otpy_your_api_key_here",
+        "OTPY_USER_KEY": "otpy_uk_your_user_key_here"
+      }
+    }
+  }
+}
+```
+
 ## Flags and environment variables
 
 Every value can be passed as a flag or an env var; flags win.
@@ -53,7 +72,7 @@ Every value can be passed as a flag or an env var; flags win.
 | Flag | Env var | Default |
 |---|---|---|
 | `--api-key` | `OTPY_API_KEY` | — (required for OTP tools) |
-| `--user-key` | `OTPY_USER_KEY` | — (required for write/billing tools) |
+| `--user-key` | `OTPY_USER_KEY` | — (required for project reads and write/billing tools) |
 | `--base-url` | `OTPY_BASE_URL` | `https://api.otpy.ir` |
 
 ## Verify the install
@@ -67,4 +86,4 @@ Expected: a single JSON line with `serverInfo` (`name: "otpy-mcp"`, current vers
 ## Notes
 
 - The legacy `OTPY_MCP_WRITE` / `--write` flag is **removed** — it was never verified server-side. It is now a complete no-op. Only a real `user_key` with the matching scope grants write/billing access. See [Scopes](Scopes).
-- Without `OTPY_USER_KEY`, read-only tools (`get_usage`, `get_integration_snippet`) still work; write/billing tools fail closed with a clear message.
+- Without `OTPY_USER_KEY`, API-key-only tools (`get_usage`, `get_integration_snippet`) still work; project reads and write/billing tools fail closed with a clear message.

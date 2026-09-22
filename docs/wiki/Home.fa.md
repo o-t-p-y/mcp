@@ -9,14 +9,15 @@
 این سرور ابزارهای OTPy را از طریق MCP stdio در دسترس قرار می‌دهد:
 
 - **ابزارهای خواندنی** (فقط کلید API پروژه): `get_usage`، `get_integration_snippet`
-- **ابزارهای صورتحساب** (کلید کاربری با اسکوپ `billing`): `get_balance`، `list_api_keys`
+- **ابزارهای خواندن پروژه** (کلید کاربری فعال): `list_projects`، `list_otp_messages`
+- **ابزارهای صورتحساب** (کلید کاربری با اسکوپ `billing`): `get_balance`، `list_api_keys`، `list_transactions`
 - **ابزارهای نوشتن** (کلید کاربری با اسکوپ `write`): `send_test_otp`، `verify_test_otp`، `create_api_key`
 
 همه چک‌های اسکوپ در هر فراخوانی به‌صورت زنده با API تأیید می‌شوند — هیچ دورزدن سمت کلاینتی وجود ندارد.
 
 ## صفحه‌ها
 
-- [نصب](Installation) — راه‌اندازی Cursor و Claude Desktop
+- [نصب](Installation) — راه‌اندازی Cursor، Claude Desktop و Kilo
 - [ابزارها](Tools) — مرجع کامل ابزارها با ورودی و خروجی
 - [اسکوپ‌ها](Scopes) — مدل اسکوپ `user_keys` (‏`write`، `billing`، ‏`root` مشتق، گرنت‌های پروژه)
 
@@ -31,7 +32,7 @@ npx -y @o-t-p-y/mcp
 | متغیر محیطی | اعتبار | از کجا بگیرید |
 |---|---|---|
 | `OTPY_API_KEY` | کلید API پروژه (`otpy_...`) | تنظیمات پروژه در [dash.otpy.ir](https://dash.otpy.ir) |
-| `OTPY_USER_KEY` | کلید کاربری (`otpy_uk_...`) | تب **Integrate** در [dash.otpy.ir](https://dash.otpy.ir) |
+| `OTPY_USER_KEY` | کلید کاربری (`otpy_uk_...`) | صفحه‌ی **Integration** (`/integrate`) در [dash.otpy.ir](https://dash.otpy.ir) |
 
 برای کانفیگ کامل کلاینت‌ها، [نصب](Installation) را ببینید.
 
