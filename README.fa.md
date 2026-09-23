@@ -55,7 +55,7 @@
 }
 ```
 
-می‌توانید اسنیپت آماده MCP را مستقیماً از صفحه‌ی **Integration** (`/integrate`) در [dash.otpy.ir](https://dash.otpy.ir) کپی کنید.
+می‌توانید اسنیپت آماده MCP (برای Cursor، Claude Desktop، Windsurf و Kilo) را از صفحه‌ی **تنظیمات پروژه** (`/project-settings`) در [dash.otpy.ir](https://dash.otpy.ir) کپی کنید. ساخت خودِ کلید کاربری در صفحه‌ی **یکپارچه‌سازی** (`/integrate`) انجام می‌شود.
 
 ## مدل اسکوپ (`user_keys`)
 

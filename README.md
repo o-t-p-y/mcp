@@ -53,7 +53,7 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-You can also copy the pre-configured MCP snippet directly from the **Integration** page (`/integrate`) on [dash.otpy.ir](https://dash.otpy.ir).
+You can also copy the pre-configured MCP snippet (Cursor, Claude Desktop, Windsurf, and Kilo) from your project's **Project Settings** page (`/project-settings`) on [dash.otpy.ir](https://dash.otpy.ir). Create the user key itself on the **Integration** page (`/integrate`).
 
 ## Scope model (`user_keys`)
 
