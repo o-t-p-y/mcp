@@ -449,6 +449,21 @@ describe("otpy mcp server", () => {
         expect(res.content[0]?.text).toContain("OTPY_API_KEY");
       }
     });
+
+    it("returns a framework-neutral PHP snippet (no Laravel assumption)", async () => {
+      const res = await handleToolCall(
+        "get_integration_snippet",
+        { language: "php" },
+        baseConfig,
+        vi.fn() as unknown as typeof fetch,
+      );
+      const text = res.content[0]?.text ?? "";
+      // The PHP snippet must run in any PHP stack: plain cURL, no framework facades.
+      expect(text).toContain("curl_init");
+      expect(text).not.toContain("Illuminate");
+      expect(text).not.toContain("Laravel");
+      expect(text).toContain("OTPY_API_KEY");
+    });
   });
 
   describe("bin startup", () => {

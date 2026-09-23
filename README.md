@@ -55,6 +55,8 @@ Add to `claude_desktop_config.json`:
 
 You can also copy the pre-configured MCP snippet (Cursor, Claude Desktop, Windsurf, and Kilo) from your project's **Project Settings** page (`/project-settings`) on [dash.otpy.ir](https://dash.otpy.ir). Create the user key itself on the **Integration** page (`/integrate`).
 
+The server speaks standard MCP over stdio and works with **any MCP-compatible agent** — Cursor, Claude Desktop, Windsurf, and Kilo are configuration examples, not requirements. Likewise, the `get_integration_snippet` tool covers any code stack (Node.js, Python, Go, PHP, cURL, C#) with framework-neutral code.
+
 ## Scope model (`user_keys`)
 
 Every user key has exactly two independently toggleable scopes, `write` and `billing`, plus a `root` flag that is always *derived* as `write AND billing` — it is never set directly. There is no third, separately-grantable permission.
