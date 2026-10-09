@@ -54,6 +54,58 @@ export function parseConfig(
   return { apiKey, userKey, baseUrl };
 }
 
+// Flags that take a value: their next arg is never read as --help/--version.
+const VALUE_FLAGS = new Set(["--api-key", "--user-key", "--base-url"]);
+
+export function parseCliAction(args: string[] = process.argv.slice(2)): "help" | "version" | null {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg !== undefined && VALUE_FLAGS.has(arg)) {
+      i++;
+      continue;
+    }
+    if (arg === "--help" || arg === "-h") return "help";
+    if (arg === "--version" || arg === "-v") return "version";
+  }
+  return null;
+}
+
+export const HELP_TEXT = `otpy-mcp ${SERVER_VERSION} - OTPy MCP server (stdio)
+
+Usage:
+  npx -y @o-t-p-y/mcp [options]
+
+Run by an MCP client (Cursor, Claude Desktop, ...); it speaks JSON-RPC on stdin/stdout.
+
+Options:
+  --api-key <key>    Project API key (otpy_...). Env: OTPY_API_KEY
+  --user-key <key>   User key (otpy_uk_...) for project reads and write/billing tools. Env: OTPY_USER_KEY
+  --base-url <url>   API base URL. Env: OTPY_BASE_URL (default: https://api.otpy.ir)
+  -h, --help         Show this help and exit
+  -v, --version      Print the version and exit
+
+Docs: https://github.com/o-t-p-y/mcp#readme
+`;
+
+/**
+ * Human-facing notices for stderr at startup. Pure, so it is unit-testable;
+ * stdout is reserved for JSON-RPC and must never carry these.
+ */
+export function startupNotices(config: McpServerConfig, stdinIsTTY: boolean): string[] {
+  const notices: string[] = [];
+  if (!config.apiKey && !config.userKey) {
+    notices.push(
+      "otpy-mcp: warning: neither OTPY_API_KEY nor OTPY_USER_KEY is set; every tool except get_integration_snippet will fail. Pass --api-key / --user-key or set the env vars.",
+    );
+  }
+  if (stdinIsTTY) {
+    notices.push(
+      "otpy-mcp: waiting for an MCP client on stdin (JSON-RPC). This server is meant to be launched by an MCP client; run with --help for setup.",
+    );
+  }
+  return notices;
+}
+
 export const TOOLS = [
   {
     name: "get_usage",
@@ -266,16 +318,73 @@ export async function verifyUserKeyScopes(
   }
 }
 
-function scopeDeniedResult(text: string): { content: { type: "text"; text: string }[]; isError: true } {
+export type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
+
+function toolError(text: string): { content: { type: "text"; text: string }[]; isError: true } {
   return { isError: true, content: [{ type: "text", text }] };
 }
+
+// Cap for non-JSON bodies (e.g. a proxy's HTML error page) echoed back to the agent.
+const MAX_RAW_BODY = 2000;
+
+/**
+ * One place for every OTPy API call a tool makes. The body is read as text and
+ * then parsed as JSON, so a non-JSON response (a proxy 502 page, an empty 503)
+ * becomes the raw text or `HTTP <status>` instead of a JSON SyntaxError, and any
+ * non-2xx status is always flagged with `isError`.
+ */
+async function callApi(
+  fetchFn: typeof fetch,
+  url: string | (() => string),
+  init: RequestInit,
+): Promise<ToolResult> {
+  let target: string;
+  try {
+    // A builder lets `new URL(...)` throw here (malformed --base-url) instead of
+    // escaping handleToolCall as an unhandled rejection.
+    target = typeof url === "function" ? url() : url;
+  } catch (err) {
+    return toolError(`Invalid OTPy base URL (check OTPY_BASE_URL / --base-url): ${String(err)}`);
+  }
+  let res: Response;
+  let body: string;
+  try {
+    res = await fetchFn(target, init);
+    body = await res.text();
+  } catch (err) {
+    return toolError(`Network error: ${String(err)}`);
+  }
+
+  let text: string;
+  try {
+    text = JSON.stringify(JSON.parse(body), null, 2);
+  } catch {
+    const raw = body.trim().slice(0, MAX_RAW_BODY);
+    text = res.ok ? raw || `HTTP ${res.status}` : raw ? `HTTP ${res.status}: ${raw}` : `HTTP ${res.status}`;
+  }
+  return { isError: !res.ok, content: [{ type: "text", text }] };
+}
+
+function requireProjectId(args: Record<string, unknown>): string | ToolResult {
+  return typeof args.project_id === "string" && args.project_id
+    ? args.project_id
+    : toolError("Error: project_id is required.");
+}
+
+function requireApiKey(config: McpServerConfig): ToolResult | null {
+  return config.apiKey ? null : toolError("Error: OTPY_API_KEY is not configured.");
+}
+
+const PHONE_RE = /^09\d{9}$/;
+// Same pattern the API enforces on POST /v1/otp/verify.
+const CODE_RE = /^\d{6}$/;
 
 export async function handleToolCall(
   name: string,
   args: Record<string, unknown>,
   config: McpServerConfig,
   fetchFn: typeof fetch = globalThis.fetch,
-): Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
+): Promise<ToolResult> {
   const needsWrite = WRITE_TOOLS.includes(name);
   const needsBilling = BILLING_TOOLS.includes(name);
   const needsUserKey = USER_KEY_TOOLS.includes(name);
@@ -285,109 +394,84 @@ export async function handleToolCall(
     const verification = await verifyUserKeyScopes(config, fetchFn, projectId);
 
     if (!verification.ok) {
-      return scopeDeniedResult(
+      return toolError(
         `❌ Could not verify this MCP connection's user_key scopes: ${verification.reason}\nConfigure a valid user_key (OTPY_USER_KEY / --user-key), obtained from the "Integration" page at https://dash.otpy.ir/integrate.`,
       );
     }
 
     if (!verification.scopes.enabled) {
-      return scopeDeniedResult(
+      return toolError(
         `❌ No valid user_key is configured for this MCP connection.\nThis tool requires a user_key with the required scope. Create one on the "Integration" page at https://dash.otpy.ir/integrate and set OTPY_USER_KEY (or --user-key).`,
       );
     }
 
     if (needsWrite && !verification.scopes.write) {
-      return scopeDeniedResult(
+      return toolError(
         `❌ This MCP connection's user_key does not have the 'write' scope.\nWrite actions (sending test OTPs, creating/modifying keys) require a user_key with write enabled. Configure this on the "Integration" page at https://dash.otpy.ir/integrate.`,
       );
     }
 
     if (needsBilling && !verification.scopes.billing) {
-      return scopeDeniedResult(
+      return toolError(
         `❌ This MCP connection's user_key does not have the 'billing' scope.\nBilling-related reads (balance, API key listing) require a user_key with billing enabled. Configure this on the "Integration" page at https://dash.otpy.ir/integrate.`,
       );
     }
 
     if (projectId && verification.projectAllowed === false) {
-      return scopeDeniedResult(
+      return toolError(
         `❌ This MCP connection's user_key is not granted access to project ${projectId}.\nEither omit project_id, or grant this user_key access to that project on the "Integration" page at https://dash.otpy.ir/integrate.`,
       );
     }
   }
 
   if (name === "get_usage") {
-    if (!config.apiKey) {
-      return { isError: true, content: [{ type: "text", text: "Error: OTPY_API_KEY is not configured." }] };
-    }
-    try {
+    const missingKey = requireApiKey(config);
+    if (missingKey) return missingKey;
+    return callApi(fetchFn, () => {
       const url = new URL(`${config.baseUrl}/v1/usage`);
       if (typeof args.from === "string") url.searchParams.set("from", args.from);
       if (typeof args.to === "string") url.searchParams.set("to", args.to);
-      const res = await fetchFn(url.toString(), {
-        headers: { authorization: `Bearer ${config.apiKey}` },
-      });
-      const data = await res.json();
-      return { isError: !res.ok, content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
-    }
+      return url.toString();
+    }, {
+      headers: { authorization: `Bearer ${config.apiKey}` },
+    });
   }
 
   if (name === "list_projects") {
-    try {
-      const res = await fetchFn(`${config.baseUrl}/v1/mcp-scope/projects`, {
-        headers: { authorization: `Bearer ${config.userKey}` },
-      });
-      const data = await res.json();
-      return { isError: !res.ok, content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
-    }
+    return callApi(fetchFn, `${config.baseUrl}/v1/mcp-scope/projects`, {
+      headers: { authorization: `Bearer ${config.userKey}` },
+    });
   }
 
   if (name === "list_otp_messages" || name === "list_transactions") {
-    const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : null;
-    if (!projectId) {
-      return { isError: true, content: [{ type: "text", text: "Error: project_id is required." }] };
-    }
+    const projectId = requireProjectId(args);
+    if (typeof projectId !== "string") return projectId;
 
     const limit = typeof args.limit === "number" ? args.limit : 50;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-      return { isError: true, content: [{ type: "text", text: "Error: limit must be an integer between 1 and 100." }] };
+      return toolError("Error: limit must be an integer between 1 and 100.");
     }
 
     const endpoint = name === "list_otp_messages" ? "otp-messages" : "ledger";
-    const url = new URL(
-      `${config.baseUrl}/v1/mcp-scope/projects/${encodeURIComponent(projectId)}/${endpoint}`,
-    );
-    url.searchParams.set("limit", String(limit));
-    try {
-      const res = await fetchFn(url.toString(), {
-        headers: { authorization: `Bearer ${config.userKey}` },
-      });
-      const data = await res.json();
-      return { isError: !res.ok, content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
-    }
+    return callApi(fetchFn, () => {
+      const url = new URL(`${config.baseUrl}/v1/mcp-scope/projects/${encodeURIComponent(projectId)}/${endpoint}`);
+      url.searchParams.set("limit", String(limit));
+      return url.toString();
+    }, {
+      headers: { authorization: `Bearer ${config.userKey}` },
+    });
   }
 
   if (name === "get_balance") {
-    const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : null;
-    if (!projectId) {
-      return { isError: true, content: [{ type: "text", text: "Error: project_id is required." }] };
-    }
-    try {
+    const projectId = requireProjectId(args);
+    if (typeof projectId !== "string") return projectId;
+    return callApi(fetchFn, () => {
       const url = new URL(`${config.baseUrl}/v1/mcp-scope/balance`);
       url.searchParams.set("project_id", projectId);
-      const res = await fetchFn(url.toString(), {
-        headers: { authorization: `Bearer ${config.userKey}` },
-      });
-      const data = await res.json();
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
-    }
+      return url.toString();
+    }, {
+      headers: { authorization: `Bearer ${config.userKey}` },
+    });
   }
 
   if (name === "get_integration_snippet") {
@@ -412,93 +496,76 @@ export async function handleToolCall(
   }
 
   if (name === "send_test_otp") {
+    const missingKey = requireApiKey(config);
+    if (missingKey) return missingKey;
     const phone = String(args.phone || "");
-    if (!/^09\d{9}$/.test(phone)) {
-      return { isError: true, content: [{ type: "text", text: "Invalid phone format. Expected 09xxxxxxxxx." }] };
+    if (!PHONE_RE.test(phone)) {
+      return toolError("Invalid phone format. Expected 09xxxxxxxxx.");
     }
-    try {
-      const res = await fetchFn(`${config.baseUrl}/v1/otp/send`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${config.apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ phone }),
-      });
-      const data = await res.json();
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
-    }
+    return callApi(fetchFn, `${config.baseUrl}/v1/otp/send`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ phone }),
+    });
   }
 
   if (name === "verify_test_otp") {
+    const missingKey = requireApiKey(config);
+    if (missingKey) return missingKey;
     const phone = String(args.phone || "");
-    const code = String(args.code || "");
-    try {
-      const res = await fetchFn(`${config.baseUrl}/v1/otp/verify`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${config.apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ phone, code }),
-      });
-      const data = await res.json();
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
+    if (!PHONE_RE.test(phone)) {
+      return toolError("Invalid phone format. Expected 09xxxxxxxxx.");
     }
+    const code = String(args.code ?? "").trim();
+    if (!CODE_RE.test(code)) {
+      return toolError("Invalid code format. Expected a 6-digit code.");
+    }
+    return callApi(fetchFn, `${config.baseUrl}/v1/otp/verify`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ phone, code }),
+    });
   }
 
   if (name === "list_api_keys") {
-    const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : null;
-    if (!projectId) {
-      return { isError: true, content: [{ type: "text", text: "Error: project_id is required." }] };
-    }
-    try {
-      const res = await fetchFn(`${config.baseUrl}/v1/mcp-scope/projects/${projectId}/api-keys`, {
-        headers: { authorization: `Bearer ${config.userKey}` },
-      });
-      const data = await res.json();
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
-    }
+    const projectId = requireProjectId(args);
+    if (typeof projectId !== "string") return projectId;
+    return callApi(fetchFn, `${config.baseUrl}/v1/mcp-scope/projects/${encodeURIComponent(projectId)}/api-keys`, {
+      headers: { authorization: `Bearer ${config.userKey}` },
+    });
   }
 
   if (name === "create_api_key") {
-    const projectId = typeof args.project_id === "string" && args.project_id ? args.project_id : null;
-    if (!projectId) {
-      return { isError: true, content: [{ type: "text", text: "Error: project_id is required." }] };
-    }
+    const projectId = requireProjectId(args);
+    if (typeof projectId !== "string") return projectId;
     const body: Record<string, unknown> = { name: String(args.name ?? "") };
     for (const key of ["limit_daily_otp", "limit_weekly_otp", "limit_monthly_otp"] as const) {
       if (typeof args[key] === "number") body[key] = args[key];
     }
-    try {
-      const res = await fetchFn(`${config.baseUrl}/v1/mcp-scope/projects/${projectId}/api-keys`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${config.userKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (err) {
-      return { isError: true, content: [{ type: "text", text: `Network error: ${String(err)}` }] };
-    }
+    return callApi(fetchFn, `${config.baseUrl}/v1/mcp-scope/projects/${encodeURIComponent(projectId)}/api-keys`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.userKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
   }
 
-  return { isError: true, content: [{ type: "text", text: `Unknown tool: ${name}` }] };
+  return toolError(`Unknown tool: ${name}`);
 }
 
 export function startMcpServer(
   config: McpServerConfig = parseConfig(),
   input: NodeJS.ReadableStream = process.stdin,
   output: NodeJS.WritableStream = process.stdout,
+  fetchFn: typeof fetch = globalThis.fetch,
 ) {
   const rl = createInterface({ input, terminal: false });
 
@@ -565,7 +632,21 @@ export function startMcpServer(
       const toolArgs = ((request.params as { arguments?: Record<string, unknown> })?.arguments ||
         {}) as Record<string, unknown>;
 
-      const res = await handleToolCall(toolName, toolArgs, config);
+      // Last-resort guard: an unexpected throw must become a JSON-RPC error,
+      // not an unhandled rejection that kills the stdio server.
+      let res: ToolResult;
+      try {
+        res = await handleToolCall(toolName, toolArgs, config, fetchFn);
+      } catch (err) {
+        output.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { code: -32603, message: `Internal error: ${String(err)}` },
+          }) + "\n",
+        );
+        return;
+      }
       output.write(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -590,5 +671,16 @@ export function startMcpServer(
 // is the link path while import.meta.url is the realpath — compare realpaths.
 const invokedPath = process.argv[1] ? realpathSync(process.argv[1]) : "";
 if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
-  startMcpServer();
+  const action = parseCliAction();
+  if (action === "help") {
+    process.stdout.write(HELP_TEXT);
+  } else if (action === "version") {
+    process.stdout.write(`${SERVER_VERSION}\n`);
+  } else {
+    const config = parseConfig();
+    for (const notice of startupNotices(config, Boolean(process.stdin.isTTY))) {
+      process.stderr.write(`${notice}\n`);
+    }
+    startMcpServer(config);
+  }
 }

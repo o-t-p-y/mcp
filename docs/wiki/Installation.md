@@ -74,6 +74,10 @@ Every value can be passed as a flag or an env var; flags win.
 | `--api-key` | `OTPY_API_KEY` | — (required for OTP tools) |
 | `--user-key` | `OTPY_USER_KEY` | — (required for project reads and write/billing tools) |
 | `--base-url` | `OTPY_BASE_URL` | `https://api.otpy.ir` |
+| `-h`, `--help` | — | Print usage and exit |
+| `-v`, `--version` | — | Print the version and exit |
+
+Startup notices go to stderr only, because stdout carries JSON-RPC. The server warns when neither key is set, and notes when stdin is a terminal that it is waiting for an MCP client.
 
 ## Verify the install
 
@@ -81,7 +85,13 @@ Every value can be passed as a flag or an env var; flags win.
 printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n' | npx -y @o-t-p-y/mcp
 ```
 
-Expected: a single JSON line with `serverInfo` (`name: "otpy-mcp"`, current version). The process exits on stdin EOF.
+Expected: a single JSON line with `serverInfo` (`name: "otpy-mcp"`, current version). The process exits on stdin EOF. Without keys, a warning is printed on stderr; stdout still holds only the JSON line.
+
+To check the installed version without starting the server:
+
+```bash
+npx -y @o-t-p-y/mcp --version
+```
 
 ## Notes
 

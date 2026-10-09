@@ -57,6 +57,18 @@ You can also copy the pre-configured MCP snippet (Cursor, Claude Desktop, Windsu
 
 The server speaks standard MCP over stdio and works with **any MCP-compatible agent** — Cursor, Claude Desktop, Windsurf, and Kilo are configuration examples, not requirements. Likewise, the `get_integration_snippet` tool covers any code stack (Node.js, Python, Go, PHP, cURL, C#) with framework-neutral code.
 
+### Command-line flags
+
+| Flag | Env var | Purpose |
+|---|---|---|
+| `--api-key <key>` | `OTPY_API_KEY` | Project API key (`otpy_...`) |
+| `--user-key <key>` | `OTPY_USER_KEY` | User key (`otpy_uk_...`) |
+| `--base-url <url>` | `OTPY_BASE_URL` | API base URL (default `https://api.otpy.ir`) |
+| `-h`, `--help` | — | Print usage and exit |
+| `-v`, `--version` | — | Print the version and exit |
+
+Flags win over env vars. Startup notices go to **stderr** only, because stdout carries the JSON-RPC protocol: the server warns when neither key is set, and when you run it by hand in a terminal it notes that it is waiting for an MCP client.
+
 ## Scope model (`user_keys`)
 
 Every user key has exactly two independently toggleable scopes, `write` and `billing`, plus a `root` flag that is always *derived* as `write AND billing` — it is never set directly. There is no third, separately-grantable permission.
@@ -94,7 +106,7 @@ Whenever a tool call includes a `project_id` argument, the server checks this al
 | `list_projects` | user key | List projects visible to the user key |
 | `list_otp_messages` | user key | List messages; status is internal and `verified_at` marks verification, not carrier delivery |
 | `list_transactions` | `billing` | List wallet ledger transactions in tomans |
-| `get_balance` | `billing` | Current wallet balance and pricing details |
+| `get_balance` | `billing` | Current wallet balance (`balance_toman`) |
 | `list_api_keys` | `billing` | List project API keys and limits |
 | `get_integration_snippet` | none | Generate copyable code snippets |
 | `send_test_otp` | `write` | Send a test OTP code to a phone number |
