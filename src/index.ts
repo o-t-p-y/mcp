@@ -333,11 +333,23 @@ const MAX_RAW_BODY = 2000;
  * becomes the raw text or `HTTP <status>` instead of a JSON SyntaxError, and any
  * non-2xx status is always flagged with `isError`.
  */
-async function callApi(fetchFn: typeof fetch, url: string, init: RequestInit): Promise<ToolResult> {
+async function callApi(
+  fetchFn: typeof fetch,
+  url: string | (() => string),
+  init: RequestInit,
+): Promise<ToolResult> {
+  let target: string;
+  try {
+    // A builder lets `new URL(...)` throw here (malformed --base-url) instead of
+    // escaping handleToolCall as an unhandled rejection.
+    target = typeof url === "function" ? url() : url;
+  } catch (err) {
+    return toolError(`Invalid OTPy base URL (check OTPY_BASE_URL / --base-url): ${String(err)}`);
+  }
   let res: Response;
   let body: string;
   try {
-    res = await fetchFn(url, init);
+    res = await fetchFn(target, init);
     body = await res.text();
   } catch (err) {
     return toolError(`Network error: ${String(err)}`);
@@ -415,10 +427,12 @@ export async function handleToolCall(
   if (name === "get_usage") {
     const missingKey = requireApiKey(config);
     if (missingKey) return missingKey;
-    const url = new URL(`${config.baseUrl}/v1/usage`);
-    if (typeof args.from === "string") url.searchParams.set("from", args.from);
-    if (typeof args.to === "string") url.searchParams.set("to", args.to);
-    return callApi(fetchFn, url.toString(), {
+    return callApi(fetchFn, () => {
+      const url = new URL(`${config.baseUrl}/v1/usage`);
+      if (typeof args.from === "string") url.searchParams.set("from", args.from);
+      if (typeof args.to === "string") url.searchParams.set("to", args.to);
+      return url.toString();
+    }, {
       headers: { authorization: `Bearer ${config.apiKey}` },
     });
   }
@@ -439,11 +453,11 @@ export async function handleToolCall(
     }
 
     const endpoint = name === "list_otp_messages" ? "otp-messages" : "ledger";
-    const url = new URL(
-      `${config.baseUrl}/v1/mcp-scope/projects/${encodeURIComponent(projectId)}/${endpoint}`,
-    );
-    url.searchParams.set("limit", String(limit));
-    return callApi(fetchFn, url.toString(), {
+    return callApi(fetchFn, () => {
+      const url = new URL(`${config.baseUrl}/v1/mcp-scope/projects/${encodeURIComponent(projectId)}/${endpoint}`);
+      url.searchParams.set("limit", String(limit));
+      return url.toString();
+    }, {
       headers: { authorization: `Bearer ${config.userKey}` },
     });
   }
@@ -451,9 +465,11 @@ export async function handleToolCall(
   if (name === "get_balance") {
     const projectId = requireProjectId(args);
     if (typeof projectId !== "string") return projectId;
-    const url = new URL(`${config.baseUrl}/v1/mcp-scope/balance`);
-    url.searchParams.set("project_id", projectId);
-    return callApi(fetchFn, url.toString(), {
+    return callApi(fetchFn, () => {
+      const url = new URL(`${config.baseUrl}/v1/mcp-scope/balance`);
+      url.searchParams.set("project_id", projectId);
+      return url.toString();
+    }, {
       headers: { authorization: `Bearer ${config.userKey}` },
     });
   }
@@ -549,6 +565,7 @@ export function startMcpServer(
   config: McpServerConfig = parseConfig(),
   input: NodeJS.ReadableStream = process.stdin,
   output: NodeJS.WritableStream = process.stdout,
+  fetchFn: typeof fetch = globalThis.fetch,
 ) {
   const rl = createInterface({ input, terminal: false });
 
@@ -615,7 +632,21 @@ export function startMcpServer(
       const toolArgs = ((request.params as { arguments?: Record<string, unknown> })?.arguments ||
         {}) as Record<string, unknown>;
 
-      const res = await handleToolCall(toolName, toolArgs, config);
+      // Last-resort guard: an unexpected throw must become a JSON-RPC error,
+      // not an unhandled rejection that kills the stdio server.
+      let res: ToolResult;
+      try {
+        res = await handleToolCall(toolName, toolArgs, config, fetchFn);
+      } catch (err) {
+        output.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { code: -32603, message: `Internal error: ${String(err)}` },
+          }) + "\n",
+        );
+        return;
+      }
       output.write(
         JSON.stringify({
           jsonrpc: "2.0",

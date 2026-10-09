@@ -3,12 +3,14 @@ import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   handleToolCall,
   parseCliAction,
   parseConfig,
+  startMcpServer,
   startupNotices,
   TOOLS,
   verifyUserKeyScopes,
@@ -534,6 +536,25 @@ describe("otpy mcp server", () => {
       });
     }
 
+    for (const [tool, args] of [
+      ["get_usage", { from: "2026-01-01" }],
+      ["list_otp_messages", { project_id: "proj_1" }],
+      ["get_balance", { project_id: "proj_1" }],
+    ] as const) {
+      it(`${tool} returns an isError result (not a throw) for a scheme-less base URL`, async () => {
+        const fetchFn = gatedFetch(() => jsonResponse({ ok: true }));
+        const res = await handleToolCall(
+          tool,
+          { ...args },
+          { ...baseConfig, baseUrl: "api.otpy.ir" },
+          fetchFn as unknown as typeof fetch,
+        );
+        expect(res.isError).toBe(true);
+        // Gated tools hit the scope check first; either way it is a result, not a throw.
+        expect(res.content[0]?.text).toMatch(/base URL|Invalid URL/);
+      });
+    }
+
     function otpCalls(fetchFn: ReturnType<typeof vi.fn>) {
       return fetchFn.mock.calls.filter(([url]) => String(url).includes("/v1/otp/"));
     }
@@ -595,6 +616,48 @@ describe("otpy mcp server", () => {
     }
   });
 
+  describe("startMcpServer", () => {
+    function runOne(line: string, config: McpServerConfig, fetchFn: typeof fetch): Promise<Record<string, unknown>> {
+      const input = new PassThrough();
+      const output = new PassThrough();
+      startMcpServer(config, input, output, fetchFn);
+      return new Promise((resolve) => {
+        output.once("data", (chunk: Buffer) => resolve(JSON.parse(chunk.toString()) as Record<string, unknown>));
+        input.write(`${line}\n`);
+      });
+    }
+
+    it("answers tools/call get_usage with an isError result when the base URL is malformed", async () => {
+      const fetchFn = vi.fn(async () => jsonResponse({ ok: true }));
+      const msg = await runOne(
+        '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_usage","arguments":{}}}',
+        { ...baseConfig, baseUrl: "api.otpy.ir" },
+        fetchFn as unknown as typeof fetch,
+      );
+      expect(msg.id).toBe(7);
+      expect((msg.result as { isError?: boolean }).isError).toBe(true);
+      expect(fetchFn).not.toHaveBeenCalled();
+    });
+
+    it("replies with a JSON-RPC internal error instead of crashing when a tool throws", async () => {
+      // A response whose `ok` getter throws escapes callApi's try blocks.
+      const fetchFn = vi.fn(async () => ({
+        text: async () => "{}",
+        get ok(): boolean {
+          throw new Error("boom");
+        },
+      }));
+      const msg = await runOne(
+        '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"get_usage","arguments":{}}}',
+        baseConfig,
+        fetchFn as unknown as typeof fetch,
+      );
+      expect(msg.id).toBe(8);
+      expect((msg.error as { code: number; message: string }).code).toBe(-32603);
+      expect((msg.error as { message: string }).message).toContain("boom");
+    });
+  });
+
   describe("startupNotices", () => {
     it("warns when neither key is configured", () => {
       const notices = startupNotices({ ...baseConfig, apiKey: "", userKey: "" }, false);
@@ -634,6 +697,12 @@ describe("otpy mcp server", () => {
 
   describe("bin startup", () => {
     const distPath = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+    // Locally these are skipped until `pnpm build` has run; under CI a missing
+    // dist is a pipeline bug (build must run before test), so fail instead.
+    if (process.env.CI && !existsSync(distPath)) {
+      throw new Error(`dist/index.js is missing under CI — run \`pnpm build\` before \`pnpm test\`.`);
+    }
+    const distIt = it.skipIf(!existsSync(distPath));
     const pkgVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
     const noKeysEnv = (() => {
       const env = { ...process.env };
@@ -643,8 +712,7 @@ describe("otpy mcp server", () => {
     })();
 
     for (const flag of ["--version", "-v"]) {
-      it(`prints the version for ${flag} and exits without reading stdin`, () => {
-        if (!existsSync(distPath)) return; // requires `pnpm build` first
+      distIt(`prints the version for ${flag} and exits without reading stdin`, () => {
         const result = spawnSync(process.execPath, [distPath, flag], { encoding: "utf8", timeout: 5000 });
         expect(result.status).toBe(0);
         expect(result.stdout.trim()).toBe(pkgVersion);
@@ -652,8 +720,7 @@ describe("otpy mcp server", () => {
     }
 
     for (const flag of ["--help", "-h"]) {
-      it(`prints usage for ${flag} and exits without reading stdin`, () => {
-        if (!existsSync(distPath)) return; // requires `pnpm build` first
+      distIt(`prints usage for ${flag} and exits without reading stdin`, () => {
         const result = spawnSync(process.execPath, [distPath, flag], { encoding: "utf8", timeout: 5000 });
         expect(result.status).toBe(0);
         expect(result.stdout).toMatch(/Usage/);
@@ -664,8 +731,7 @@ describe("otpy mcp server", () => {
       });
     }
 
-    it("keeps stdout pure JSON-RPC and warns on stderr when no keys are configured", () => {
-      if (!existsSync(distPath)) return; // requires `pnpm build` first
+    distIt("keeps stdout pure JSON-RPC and warns on stderr when no keys are configured", () => {
       const result = spawnSync(process.execPath, [distPath], {
         encoding: "utf8",
         env: noKeysEnv,
@@ -681,8 +747,7 @@ describe("otpy mcp server", () => {
       expect(msg.result.serverInfo).toBeTruthy();
     });
 
-    it("starts the server when invoked through a symlink (npm bin link)", () => {
-      if (!existsSync(distPath)) return; // requires `pnpm build` first
+    distIt("starts the server when invoked through a symlink (npm bin link)", () => {
       const dir = mkdtempSync(join(tmpdir(), "otpy-mcp-link-"));
       try {
         const link = join(dir, "otpy-mcp");
@@ -700,8 +765,7 @@ describe("otpy mcp server", () => {
       }
     });
 
-    it("single-sources the server version from package.json", () => {
-      if (!existsSync(distPath)) return; // requires `pnpm build` first
+    distIt("single-sources the server version from package.json", () => {
       const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
       const result = spawnSync(process.execPath, [distPath], {
         encoding: "utf8",
