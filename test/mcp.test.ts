@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { handleToolCall, parseConfig, TOOLS, verifyUserKeyScopes } from "../src/index.js";
+import {
+  handleToolCall,
+  parseCliAction,
+  parseConfig,
+  startupNotices,
+  TOOLS,
+  verifyUserKeyScopes,
+} from "../src/index.js";
 import type { McpServerConfig } from "../src/index.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -466,8 +473,213 @@ describe("otpy mcp server", () => {
     });
   });
 
+  describe("handleToolCall: API error flags and input validation (#43)", () => {
+    const allScopes = { write: true, billing: true, root: true, enabled: true, project_allowed: true };
+
+    function gatedFetch(apiResponse: () => Response) {
+      return vi
+        .fn()
+        .mockImplementationOnce(async () => jsonResponse(allScopes))
+        .mockImplementation(async () => apiResponse());
+    }
+
+    const toolCases: [string, Record<string, unknown>][] = [
+      ["get_balance", { project_id: "proj_1" }],
+      ["list_api_keys", { project_id: "proj_1" }],
+      ["create_api_key", { project_id: "proj_1", name: "x" }],
+      ["send_test_otp", { phone: "09123456789" }],
+      ["verify_test_otp", { phone: "09123456789", code: "123456" }],
+    ];
+
+    for (const [tool, args] of toolCases) {
+      it(`${tool} flags a 500 response as an MCP tool error`, async () => {
+        const fetchFn = gatedFetch(() => jsonResponse({ error: "internal" }, 500));
+        const res = await handleToolCall(tool, args, baseConfig, fetchFn as unknown as typeof fetch);
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain("internal");
+        expect(fetchFn).toHaveBeenCalledTimes(2);
+      });
+    }
+
+    it("turns a non-JSON 502 body into an error with the raw text, never a SyntaxError", async () => {
+      const fetchFn = gatedFetch(
+        () => new Response("<html>502 Bad Gateway</html>", { status: 502, headers: { "content-type": "text/html" } }),
+      );
+      const res = await handleToolCall("get_balance", { project_id: "proj_1" }, baseConfig, fetchFn as unknown as typeof fetch);
+      expect(res.isError).toBe(true);
+      expect(res.content[0]?.text).toContain("502 Bad Gateway");
+      expect(res.content[0]?.text).not.toContain("SyntaxError");
+    });
+
+    it("reports HTTP <status> when an error body is empty", async () => {
+      const fetchFn = vi.fn(async () => new Response("", { status: 503 }));
+      const res = await handleToolCall("get_usage", {}, baseConfig, fetchFn as unknown as typeof fetch);
+      expect(res.isError).toBe(true);
+      expect(res.content[0]?.text).toContain("HTTP 503");
+      expect(res.content[0]?.text).not.toContain("SyntaxError");
+    });
+
+    for (const tool of ["list_api_keys", "create_api_key"]) {
+      it(`${tool} URL-encodes project_id in the request path`, async () => {
+        const fetchFn = gatedFetch(() => jsonResponse({ ok: true }));
+        await handleToolCall(
+          tool,
+          { project_id: "a/../b?x=1#y", name: "k" },
+          baseConfig,
+          fetchFn as unknown as typeof fetch,
+        );
+        expect(String(fetchFn.mock.calls[1]?.[0])).toBe(
+          "https://api.otpy.ir/v1/mcp-scope/projects/a%2F..%2Fb%3Fx%3D1%23y/api-keys",
+        );
+      });
+    }
+
+    function otpCalls(fetchFn: ReturnType<typeof vi.fn>) {
+      return fetchFn.mock.calls.filter(([url]) => String(url).includes("/v1/otp/"));
+    }
+
+    for (const phone of ["9123456789", "0912345678", "+989123456789", "0912345678a"]) {
+      it(`verify_test_otp rejects bad phone ${JSON.stringify(phone)} without calling the API`, async () => {
+        const fetchFn = gatedFetch(() => jsonResponse({ verified: true }));
+        const res = await handleToolCall(
+          "verify_test_otp",
+          { phone, code: "123456" },
+          baseConfig,
+          fetchFn as unknown as typeof fetch,
+        );
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain("phone");
+        expect(otpCalls(fetchFn)).toHaveLength(0);
+      });
+    }
+
+    for (const code of ["", "12345", "1234567", "12345a", "۱۲۳۴۵۶"]) {
+      it(`verify_test_otp rejects bad code ${JSON.stringify(code)} without calling the API`, async () => {
+        const fetchFn = gatedFetch(() => jsonResponse({ verified: true }));
+        const res = await handleToolCall(
+          "verify_test_otp",
+          { phone: "09123456789", code },
+          baseConfig,
+          fetchFn as unknown as typeof fetch,
+        );
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain("code");
+        expect(otpCalls(fetchFn)).toHaveLength(0);
+      });
+    }
+
+    it("verify_test_otp trims the code before sending it", async () => {
+      const fetchFn = gatedFetch(() => jsonResponse({ verified: true }));
+      const res = await handleToolCall(
+        "verify_test_otp",
+        { phone: "09123456789", code: " 123456 " },
+        baseConfig,
+        fetchFn as unknown as typeof fetch,
+      );
+      expect(res.isError).toBeFalsy();
+      const [, init] = otpCalls(fetchFn)[0]!;
+      expect(JSON.parse(String((init as RequestInit).body))).toEqual({ phone: "09123456789", code: "123456" });
+    });
+
+    for (const [tool, args] of [
+      ["send_test_otp", { phone: "09123456789" }],
+      ["verify_test_otp", { phone: "09123456789", code: "123456" }],
+    ] as const) {
+      it(`${tool} refuses to call the API when OTPY_API_KEY is empty`, async () => {
+        const fetchFn = gatedFetch(() => jsonResponse({ ok: true }));
+        const res = await handleToolCall(tool, { ...args }, { ...baseConfig, apiKey: "" }, fetchFn as unknown as typeof fetch);
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain("OTPY_API_KEY");
+        expect(otpCalls(fetchFn)).toHaveLength(0);
+      });
+    }
+  });
+
+  describe("startupNotices", () => {
+    it("warns when neither key is configured", () => {
+      const notices = startupNotices({ ...baseConfig, apiKey: "", userKey: "" }, false);
+      expect(notices.join("\n")).toMatch(/OTPY_API_KEY/);
+      expect(notices.join("\n")).toMatch(/OTPY_USER_KEY/);
+    });
+
+    it("is silent when a key is configured and stdin is not a TTY", () => {
+      expect(startupNotices(baseConfig, false)).toEqual([]);
+      expect(startupNotices({ ...baseConfig, userKey: "" }, false)).toEqual([]);
+      expect(startupNotices({ ...baseConfig, apiKey: "" }, false)).toEqual([]);
+    });
+
+    it("notes that the server is waiting for a client when stdin is a TTY", () => {
+      const notices = startupNotices(baseConfig, true);
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toMatch(/waiting/i);
+      expect(notices[0]).toMatch(/--help/);
+    });
+  });
+
+  describe("parseCliAction", () => {
+    it("detects help and version flags", () => {
+      expect(parseCliAction(["--help"])).toBe("help");
+      expect(parseCliAction(["-h"])).toBe("help");
+      expect(parseCliAction(["--version"])).toBe("version");
+      expect(parseCliAction(["-v"])).toBe("version");
+      expect(parseCliAction(["--api-key", "k"])).toBeNull();
+      expect(parseCliAction([])).toBeNull();
+    });
+
+    it("does not mistake a flag value for --help/--version", () => {
+      expect(parseCliAction(["--api-key", "-h"])).toBeNull();
+      expect(parseCliAction(["--base-url", "--version"])).toBeNull();
+    });
+  });
+
   describe("bin startup", () => {
     const distPath = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+    const pkgVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
+    const noKeysEnv = (() => {
+      const env = { ...process.env };
+      delete env.OTPY_API_KEY;
+      delete env.OTPY_USER_KEY;
+      return env;
+    })();
+
+    for (const flag of ["--version", "-v"]) {
+      it(`prints the version for ${flag} and exits without reading stdin`, () => {
+        if (!existsSync(distPath)) return; // requires `pnpm build` first
+        const result = spawnSync(process.execPath, [distPath, flag], { encoding: "utf8", timeout: 5000 });
+        expect(result.status).toBe(0);
+        expect(result.stdout.trim()).toBe(pkgVersion);
+      });
+    }
+
+    for (const flag of ["--help", "-h"]) {
+      it(`prints usage for ${flag} and exits without reading stdin`, () => {
+        if (!existsSync(distPath)) return; // requires `pnpm build` first
+        const result = spawnSync(process.execPath, [distPath, flag], { encoding: "utf8", timeout: 5000 });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toMatch(/Usage/);
+        expect(result.stdout).toContain("--api-key");
+        expect(result.stdout).toContain("--user-key");
+        expect(result.stdout).toContain("--base-url");
+        expect(result.stdout).toContain("--version");
+      });
+    }
+
+    it("keeps stdout pure JSON-RPC and warns on stderr when no keys are configured", () => {
+      if (!existsSync(distPath)) return; // requires `pnpm build` first
+      const result = spawnSync(process.execPath, [distPath], {
+        encoding: "utf8",
+        env: noKeysEnv,
+        input: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toMatch(/OTPY_API_KEY/);
+      const lines = result.stdout.split("\n").filter(Boolean);
+      expect(lines).toHaveLength(1);
+      const msg = JSON.parse(lines[0]!) as { jsonrpc: string; id: number; result: { serverInfo: unknown } };
+      expect(msg.jsonrpc).toBe("2.0");
+      expect(msg.id).toBe(1);
+      expect(msg.result.serverInfo).toBeTruthy();
+    });
 
     it("starts the server when invoked through a symlink (npm bin link)", () => {
       if (!existsSync(distPath)) return; // requires `pnpm build` first

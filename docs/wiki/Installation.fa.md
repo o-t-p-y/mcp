@@ -57,6 +57,10 @@
 | `--api-key` | `OTPY_API_KEY` | — (برای ابزارهای OTP لازم) |
 | `--user-key` | `OTPY_USER_KEY` | — (برای ابزارهای write/billing لازم) |
 | `--base-url` | `OTPY_BASE_URL` | `https://api.otpy.ir` |
+| `-h`، `--help` | — | نمایش راهنما و خروج |
+| `-v`، `--version` | — | چاپ نسخه و خروج |
+
+پیام‌های شروع فقط روی stderr نوشته می‌شوند، چون stdout حامل JSON-RPC است. اگر هیچ‌کدام از دو کلید تنظیم نشده باشد سرور هشدار می‌دهد، و اگر stdin ترمینال باشد یادآوری می‌کند که منتظر یک کلاینت MCP است.
 
 ## بررسی نصب
 
@@ -64,7 +68,13 @@
 printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n' | npx -y @o-t-p-y/mcp
 ```
 
-خروجی موردانتظار: یک خط JSON با `serverInfo` (‏`name: "otpy-mcp"` و نسخه فعلی). پروسه با EOF روی stdin خارج می‌شود.
+خروجی موردانتظار: یک خط JSON با `serverInfo` (‏`name: "otpy-mcp"` و نسخه فعلی). پروسه با EOF روی stdin خارج می‌شود. بدون کلید، یک هشدار روی stderr چاپ می‌شود؛ stdout همچنان فقط همان خط JSON را دارد.
+
+برای دیدن نسخه‌ی نصب‌شده بدون اجرای سرور:
+
+```bash
+npx -y @o-t-p-y/mcp --version
+```
 
 ## نکته‌ها
 
